@@ -13,7 +13,6 @@ TG_CHAT_ID = "1053431273"
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}"
 
 def tg_send(text, reply_markup=None):
-    """Отправить сообщение в Telegram"""
     try:
         data = {
             "chat_id": TG_CHAT_ID,
@@ -28,7 +27,6 @@ def tg_send(text, reply_markup=None):
         print(f"❌ Telegram error: {e}")
 
 def tg_notify_new_pin(pin_id, name, car, phone, pin):
-    """Уведомление о новой заявке с кнопками"""
     text = (
         f"🔑 <b>Новая заявка на регистрацию</b>\n\n"
         f"👤 Имя: <b>{name}</b>\n"
@@ -52,7 +50,6 @@ def tg_notify_rejected(name, car):
     tg_send(f"❌ Заявка <b>{name}</b> ({car}) отклонена")
 
 def tg_answer_callback(callback_id, text):
-    """Ответ на нажатие кнопки"""
     try:
         requests.post(f"{TG_API}/answerCallbackQuery", data={
             "callback_query_id": callback_id,
@@ -62,16 +59,15 @@ def tg_answer_callback(callback_id, text):
         pass
 
 # ==================== ДАННЫЕ В ПАМЯТИ ====================
-drivers        = {}
+drivers          = {}
 driver_list_full = []
-pending_codes  = {}
-driver_balances = {}
-orders         = {}
-chat_messages  = []
-chat_counter   = 0
-orders_db      = {}   # order_id → order
-order_counter  = 1000
-pending_orders = {}   # car_number → order_id (ожидает ответа водителя)
+pending_codes    = {}
+driver_balances  = {}
+orders_db        = {}
+order_counter    = 1000
+pending_orders   = {}
+chat_messages    = []
+chat_counter     = 0
 
 # ==================== ТАРИФЫ ====================
 TARIF_INFO = {
@@ -85,7 +81,6 @@ TARIF_INFO = {
 tg_offset = 0
 
 def tg_polling():
-    """Фоновый поток — получаем нажатия кнопок от Telegram"""
     global tg_offset
     print("🤖 Telegram бот запущен")
     while True:
@@ -99,16 +94,15 @@ def tg_polling():
             for upd in updates:
                 tg_offset = upd["update_id"] + 1
 
-                # Обработка нажатия кнопок
                 if "callback_query" in upd:
-                    cq      = upd["callback_query"]
-                    cq_id   = cq["id"]
-                    data    = cq.get("data", "")
+                    cq    = upd["callback_query"]
+                    cq_id = cq["id"]
+                    data  = cq.get("data", "")
 
                     if data.startswith("approve:"):
                         pin_id = data.split(":", 1)[1]
                         if pin_id in pending_codes:
-                            info = pending_codes[pin_id]
+                            info           = pending_codes[pin_id]
                             info["status"] = "approved"
                             new_driver = {
                                 "id":         info["car_number"],
@@ -123,34 +117,31 @@ def tg_polling():
                             driver_balances[new_driver["id"]] = 50000
                             tg_answer_callback(cq_id, "✅ Одобрено!")
                             tg_notify_approved(info["name"], info["car_number"], info["pin"])
-                            print(f"✅ [TG APPROVED] {info['name']} | {info['car_number']}")
                         else:
                             tg_answer_callback(cq_id, "Заявка не найдена")
 
                     elif data.startswith("reject:"):
                         pin_id = data.split(":", 1)[1]
                         if pin_id in pending_codes:
-                            info = pending_codes[pin_id]
+                            info           = pending_codes[pin_id]
                             info["status"] = "rejected"
                             tg_answer_callback(cq_id, "❌ Отклонено")
                             tg_notify_rejected(info["name"], info["car_number"])
-                            print(f"❌ [TG REJECTED] {info['name']}")
                         else:
                             tg_answer_callback(cq_id, "Заявка не найдена")
 
-                # Обработка текстовых команд
                 elif "message" in upd:
                     msg  = upd["message"]
                     text = msg.get("text", "")
 
                     if text == "/start":
                         tg_send(
-                            "🚕 <b>TAXI 1229 Samarkand</b>\n\n"
+                            "🚕 <b>TAXI 3042</b>\n\n"
                             "Доступные команды:\n"
                             "/status — водители онлайн\n"
                             "/pending — заявки на ПИН\n"
                             "/drivers — все водители\n"
-                            "/order НОМЕР Откуда;Куда;Цена — создать заказ\n\n"
+                            "/order НОМЕР Откуда;Куда;Цена\n\n"
                             "Пример:\n"
                             "<code>/order 90T785OA Регистон;Аэропорт;28500</code>"
                         )
@@ -193,24 +184,22 @@ def tg_polling():
                             tg_send("🚗 <b>Водители онлайн:</b>\n" + "\n".join(lines))
 
                     elif text.startswith("/order "):
-                        # Формат: /order 90T785OA Откуда;Куда;Цена
-                        # Пример: /order 90T785OA Регистон;Аэропорт;28500
                         try:
-                            parts = text.split(" ", 2)
-                            car   = parts[1].strip()
-                            info  = parts[2].split(";")
+                            parts     = text.split(" ", 2)
+                            car       = parts[1].strip()
+                            info      = parts[2].split(";")
                             from_addr = info[0].strip()
                             to_addr   = info[1].strip()
                             price     = int(info[2].strip())
 
                             import urllib.request, json as json_lib
                             payload = json_lib.dumps({
-                                "car_number": car,
+                                "car_number":   car,
                                 "from_address": from_addr,
-                                "to_address": to_addr,
-                                "price": price,
-                                "client": "Telegram",
-                                "distance": "—"
+                                "to_address":   to_addr,
+                                "price":        price,
+                                "client":       "Telegram",
+                                "distance":     "—"
                             }).encode()
                             req = urllib.request.Request(
                                 "http://localhost:5000/api/orders/create",
@@ -227,7 +216,6 @@ def tg_polling():
             print(f"Polling error: {e}")
             time.sleep(5)
 
-# Запускаем polling в фоне
 threading.Thread(target=tg_polling, daemon=True).start()
 
 # ==================== АДМИН-ПАНЕЛЬ HTML ====================
@@ -235,7 +223,7 @@ ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Taxi 1229 Admin</title>
+    <title>Taxi 3042 Admin</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
@@ -268,7 +256,7 @@ ADMIN_HTML = """
 </head>
 <body>
     <div class="header">
-        <h1>🚕 TAXI 1229 SAMARKAND</h1>
+        <h1>🚕 TAXI 3042</h1>
         <p>{{ current_time }}</p>
         <div class="tg-badge">🤖 Telegram бот активен</div>
     </div>
@@ -392,7 +380,157 @@ ADMIN_HTML = """
 </html>
 """
 
+# ==================== КАРТА ====================
+@app.route('/map')
+def map_page():
+    api_key = "AIzaSyDbbgIqjyOqzS7gozVqmZ_V4G1T6cpKXC0"
+    map_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Карта водителей</title>
+    <style>
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        body {{ background:#111; }}
+        #map {{ width:100vw; height:100vh; }}
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script>
+        let map;
+        let markers = {{}};
+        let infoWindows = {{}};
+
+        function initMap() {{
+            map = new google.maps.Map(document.getElementById("map"), {{
+                center: {{ lat: 39.6542, lng: 66.9597 }},
+                zoom: 13,
+                styles: [
+                    {{ elementType: "geometry", stylers: [{{ color: "#1a1a2e" }}] }},
+                    {{ elementType: "labels.text.fill", stylers: [{{ color: "#8ec3b9" }}] }},
+                    {{ elementType: "labels.text.stroke", stylers: [{{ color: "#1a3646" }}] }},
+                    {{ featureType: "road", elementType: "geometry", stylers: [{{ color: "#304a7d" }}] }},
+                    {{ featureType: "road", elementType: "labels.text.fill", stylers: [{{ color: "#98a5be" }}] }},
+                    {{ featureType: "water", elementType: "geometry", stylers: [{{ color: "#0e1626" }}] }}
+                ]
+            }});
+            updateDrivers();
+            setInterval(updateDrivers, 3000);
+        }}
+
+        function updateDrivers() {{
+            fetch("/api/drivers")
+                .then(r => r.json())
+                .then(data => {{
+                    // Удаляем маркеры которых нет
+                    Object.keys(markers).forEach(key => {{
+                        if (!data[key]) {{
+                            markers[key].setMap(null);
+                            delete markers[key];
+                        }}
+                    }});
+
+                    // Добавляем или обновляем маркеры
+                    for (let key in data) {{
+                        let d = data[key];
+                        let pos = {{ lat: parseFloat(d.lat), lng: parseFloat(d.lng) }};
+
+                        if (markers[key]) {{
+                            markers[key].setPosition(pos);
+                        }} else {{
+                            let icon = {{
+                                url: d.status === "free"
+                                    ? "https://maps.google.com/mapfiles/ms/icons/green-dot.png"
+                                    : "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
+                                scaledSize: new google.maps.Size(40, 40)
+                            }};
+
+                            markers[key] = new google.maps.Marker({{
+                                position: pos,
+                                map: map,
+                                title: d.car_number,
+                                icon: icon,
+                                label: {{
+                                    text: d.car_number,
+                                    color: "#FFD600",
+                                    fontSize: "11px",
+                                    fontWeight: "bold"
+                                }}
+                            }});
+
+                            markers[key].addListener("click", () => {{
+                                // Закрываем все открытые окна
+                                Object.values(infoWindows).forEach(w => w.close());
+
+                                infoWindows[key] = new google.maps.InfoWindow({{
+                                    content: `
+                                        <div style="background:#1a1a1a;color:#fff;padding:12px;border-radius:10px;min-width:200px;">
+                                            <div style="color:#FFD600;font-size:16px;font-weight:bold;margin-bottom:8px;">
+                                                🚗 ${{d.car_number}}
+                                            </div>
+                                            <div style="margin-bottom:4px;">👤 ${{d.driver_name || '—'}}</div>
+                                            <div style="margin-bottom:4px;">📱 ${{d.phone || '—'}}</div>
+                                            <div style="margin-bottom:4px;">
+                                                📍 Статус: <b style="color:${{d.status === 'free' ? '#4CAF50' : '#FF5252'}}">
+                                                    ${{d.status === 'free' ? 'Свободен' : 'На заказе'}}
+                                                </b>
+                                            </div>
+                                            <div style="margin-bottom:4px;">⚡ ${{d.speed}} км/ч</div>
+                                            <div style="margin-bottom:4px;">💰 ${{parseInt(d.balance || 0).toLocaleString()}} сум</div>
+                                            <div style="color:#555;font-size:11px;">🕐 ${{d.time_str}}</div>
+                                        </div>`
+                                }});
+                                infoWindows[key].open(map, markers[key]);
+                            }});
+                        }}
+                    }}
+                }})
+                .catch(err => console.log("Ошибка:", err));
+        }}
+    </script>
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initMap">
+    </script>
+</body>
+</html>
+"""
+    return map_html
+
+
 # ==================== ЭНДПОИНТЫ ====================
+@app.route('/')
+def index():
+    free          = sum(1 for d in drivers.values() if d.get('status') == 'free')
+    busy          = sum(1 for d in drivers.values() if d.get('status') == 'busy')
+    pending_count = sum(1 for p in pending_codes.values() if p.get('status') == 'pending')
+
+    pending_list = sorted([
+        {"pin_id": pid, "name": i["name"], "phone": i["phone"],
+         "car_number": i["car_number"], "pin": i["pin"], "status": i["status"]}
+        for pid, i in pending_codes.items()
+    ], key=lambda x: 0 if x['status'] == 'pending' else 1)
+
+    all_drivers_list = [{
+        "name": d["name"], "phone": d["phone"], "car_number": d["car_number"],
+        "pin": d["pin"], "balance": driver_balances.get(d["id"], 0)
+    } for d in driver_list_full]
+
+    return render_template_string(
+        ADMIN_HTML,
+        current_time     = datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+        total_drivers    = len(drivers),
+        free_drivers     = free,
+        busy_drivers     = busy,
+        pending_count    = pending_count,
+        registered_count = len(driver_list_full),
+        drivers_list     = list(drivers.items()),
+        pending_list     = pending_list,
+        all_drivers_list = all_drivers_list
+    )
+
 
 @app.route('/api/driver/register', methods=['POST'])
 def register_driver():
@@ -408,10 +546,7 @@ def register_driver():
         "name": name, "pin": pin,
         "created_at": time.time(), "status": "pending"
     }
-
-    # Уведомляем в Telegram
     tg_notify_new_pin(pin_id, name, car_number, phone, pin)
-    print(f"🔑 [NEW PIN] {name} | {car_number} | PIN: {pin}")
     return jsonify({"success": True, "message": "Заявка отправлена администратору"})
 
 
@@ -446,9 +581,8 @@ def approve_code():
     if pin_id not in pending_codes:
         return jsonify({"success": False, "error": "Заявка не найдена"}), 404
 
-    info            = pending_codes[pin_id]
-    info["status"]  = "approved"
-
+    info           = pending_codes[pin_id]
+    info["status"] = "approved"
     new_driver = {
         "id": info["car_number"], "name": info["name"],
         "phone": info["phone"],   "car_number": info["car_number"],
@@ -456,9 +590,7 @@ def approve_code():
     }
     driver_list_full.append(new_driver)
     driver_balances[new_driver['id']] = 50000
-
     tg_notify_approved(info["name"], info["car_number"], info["pin"])
-    print(f"✅ [APPROVED] {info['name']} | {info['car_number']}")
     return jsonify({"success": True, "driver": new_driver})
 
 
@@ -478,7 +610,6 @@ def driver_login():
     data = request.json
     pin  = data.get('pin', '')
 
-    # Ищем среди уже одобренных
     for d in driver_list_full:
         if d.get('pin') == pin:
             return jsonify({
@@ -488,7 +619,6 @@ def driver_login():
                 "balance":   driver_balances.get(d["id"], 0)
             })
 
-    # Ищем среди pending — ПИН правильный но ещё не одобрен
     for pin_id, info in pending_codes.items():
         if info.get('pin') == pin and info.get('status') == 'pending':
             info["status"] = "approved"
@@ -504,7 +634,6 @@ def driver_login():
             driver_list_full.append(new_driver)
             driver_balances[new_driver["id"]] = 50000
             tg_notify_approved(info["name"], info["car_number"], info["pin"])
-            print(f"✅ [AUTO APPROVED] {info['name']} | {info['car_number']}")
             return jsonify({
                 "success":   True,
                 "driver_id": new_driver["id"],
@@ -518,43 +647,17 @@ def driver_login():
 @app.route('/api/driver/<driver_id>/balance', methods=['GET'])
 def get_driver_balance(driver_id):
     if driver_id in drivers:
-        return jsonify({"balance": drivers[driver_id].get("balance", 0),
-                        "name": drivers[driver_id].get("driver_name", "")})
+        return jsonify({
+            "balance": drivers[driver_id].get("balance", 0),
+            "name":    drivers[driver_id].get("driver_name", "")
+        })
     for d in driver_list_full:
         if d["id"] == driver_id:
-            return jsonify({"balance": driver_balances.get(driver_id, 0), "name": d["name"]})
+            return jsonify({
+                "balance": driver_balances.get(driver_id, 0),
+                "name":    d["name"]
+            })
     return jsonify({"error": "Не найден"}), 404
-
-
-@app.route('/')
-def index():
-    free          = sum(1 for d in drivers.values() if d.get('status') == 'free')
-    busy          = sum(1 for d in drivers.values() if d.get('status') == 'busy')
-    pending_count = sum(1 for p in pending_codes.values() if p.get('status') == 'pending')
-
-    pending_list = sorted([
-        {"pin_id": pid, "name": i["name"], "phone": i["phone"],
-         "car_number": i["car_number"], "pin": i["pin"], "status": i["status"]}
-        for pid, i in pending_codes.items()
-    ], key=lambda x: 0 if x['status'] == 'pending' else 1)
-
-    all_drivers_list = [{
-        "name": d["name"], "phone": d["phone"], "car_number": d["car_number"],
-        "pin": d["pin"], "balance": driver_balances.get(d["id"], 0)
-    } for d in driver_list_full]
-
-    return render_template_string(
-        ADMIN_HTML,
-        current_time     = datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
-        total_drivers    = len(drivers),
-        free_drivers     = free,
-        busy_drivers     = busy,
-        pending_count    = pending_count,
-        registered_count = len(driver_list_full),
-        drivers_list     = list(drivers.items()),
-        pending_list     = pending_list,
-        all_drivers_list = all_drivers_list
-    )
 
 
 @app.route('/api/tariffs', methods=['GET'])
@@ -578,11 +681,16 @@ def location():
     balance = driver_balances.get(did, data.get('balance', 50000))
     driver_balances[did] = balance
     drivers[did] = {
-        'lat': data.get('lat', 0), 'lng': data.get('lng', 0),
-        'speed': data.get('speed', 0), 'status': data.get('status', 'free'),
-        'car_number': data.get('car_number', did), 'balance': balance,
-        'phone': data.get('phone', ''), 'driver_name': data.get('driver_name', ''),
-        'time_str': datetime.now().strftime('%H:%M:%S'), 'timestamp': time.time()
+        'lat':         data.get('lat', 0),
+        'lng':         data.get('lng', 0),
+        'speed':       data.get('speed', 0),
+        'status':      data.get('status', 'free'),
+        'car_number':  data.get('car_number', did),
+        'balance':     balance,
+        'phone':       data.get('phone', ''),
+        'driver_name': data.get('driver_name', ''),
+        'time_str':    datetime.now().strftime('%H:%M:%S'),
+        'timestamp':   time.time()
     }
     return jsonify({'status': 'ok', 'balance': balance})
 
@@ -610,12 +718,9 @@ def update_balance():
     driver_balances[did] = new_b
     if did in drivers:
         drivers[did]['balance'] = new_b
-
-    # Уведомляем в Telegram если изменение баланса от админа
     if amount != 0:
         sign = "+" if amount > 0 else ""
         tg_send(f"💰 Баланс {did}: {sign}{amount:,} сум → {new_b:,} сум")
-
     return jsonify({'status': 'ok', 'new_balance': new_b})
 
 
@@ -631,7 +736,6 @@ def block_driver():
 
 @app.route('/api/orders/create', methods=['POST'])
 def create_order():
-    """Создать заказ и назначить водителю (из админки или Telegram)"""
     global order_counter
     data        = request.json
     car_number  = data.get('car_number', '')
@@ -658,22 +762,19 @@ def create_order():
         "status":       "pending",
         "created_at":   time.time()
     }
-    orders_db[order_id]       = order
+    orders_db[order_id]        = order
     pending_orders[car_number] = order_id
 
-    # Уведомляем в Telegram
     tg_send(
         f"📦 <b>Заказ #{order_counter}</b> назначен водителю <b>{car_number}</b>\n"
         f"📍 {from_addr} → {to_addr}\n"
         f"💰 {price:,} сум"
     )
-    print(f"📦 [ORDER #{order_counter}] {car_number} | {from_addr} → {to_addr} | {price} сум")
     return jsonify({"success": True, "order_id": order_id, "order_num": order_counter})
 
 
 @app.route('/api/orders/pending', methods=['GET'])
 def get_pending_order():
-    """Водитель проверяет — есть ли для него новый заказ"""
     car = request.args.get('car', '')
     if car not in pending_orders:
         return jsonify({"has_order": False})
@@ -693,16 +794,15 @@ def get_pending_order():
 
 @app.route('/api/orders/respond', methods=['POST'])
 def respond_to_order():
-    """Водитель принимает или отклоняет заказ"""
-    data       = request.json
-    order_id   = data.get('order_id', '')
-    car        = data.get('car_number', '')
-    response_val = data.get('response', '')  # 'accepted' or 'rejected'
+    data         = request.json
+    order_id     = data.get('order_id', '')
+    car          = data.get('car_number', '')
+    response_val = data.get('response', '')
 
     if order_id not in orders_db:
         return jsonify({"success": False, "error": "Заказ не найден"}), 404
 
-    order = orders_db[order_id]
+    order           = orders_db[order_id]
     order["status"] = response_val
 
     if car in pending_orders:
@@ -710,27 +810,24 @@ def respond_to_order():
 
     if response_val == "accepted":
         tg_send(f"✅ Водитель <b>{car}</b> принял заказ #{order['order_num']}")
-        print(f"✅ [ORDER ACCEPTED] {car} принял #{order['order_num']}")
     else:
         tg_send(f"❌ Водитель <b>{car}</b> отклонил заказ #{order['order_num']}")
-        print(f"❌ [ORDER REJECTED] {car} отклонил #{order['order_num']}")
 
     return jsonify({"success": True})
 
 
 @app.route('/api/orders/list', methods=['GET'])
 def list_orders():
-    """Список всех заказов для админки"""
     return jsonify(list(orders_db.values()))
 
 
 @app.route('/api/chat/send', methods=['POST'])
 def chat_send():
     global chat_counter
-    data       = request.json
-    car        = data.get('car_number', '')
-    driver     = data.get('driver', '')
-    text       = data.get('text', '')
+    data         = request.json
+    car          = data.get('car_number', '')
+    driver       = data.get('driver', '')
+    text         = data.get('text', '')
     chat_counter += 1
     msg = {
         "id":         chat_counter,
@@ -740,26 +837,23 @@ def chat_send():
         "time":       datetime.now().strftime('%H:%M')
     }
     chat_messages.append(msg)
-    # Уведомляем диспетчера в Telegram
     tg_send(f"💬 <b>{driver}</b> ({car}):\n{text}")
     return jsonify({"success": True, "id": chat_counter})
 
 
 @app.route('/api/chat/messages', methods=['GET'])
 def chat_get():
-    car = request.args.get('car', '')
-    # Отдаём сообщения для этой машины (от диспетчера)
+    car    = request.args.get('car', '')
     result = [m for m in chat_messages if m['car_number'] == car or m['from'] == 'dispatcher']
-    return jsonify(result[-50:])  # последние 50
+    return jsonify(result[-50:])
 
 
 @app.route('/api/chat/dispatch', methods=['POST'])
 def chat_dispatch():
-    """Диспетчер отправляет сообщение водителю (из веб-панели или Telegram)"""
     global chat_counter
-    data = request.json
-    car  = data.get('car_number', '')
-    text = data.get('text', '')
+    data         = request.json
+    car          = data.get('car_number', '')
+    text         = data.get('text', '')
     chat_counter += 1
     msg = {
         "id":         chat_counter,
@@ -775,16 +869,16 @@ def chat_dispatch():
 @app.route('/ping')
 def ping():
     return jsonify({
-        'status':           'alive',
-        'drivers_online':   len(drivers),
-        'drivers_registered': len(driver_list_full),
-        'pending_requests': len([p for p in pending_codes.values() if p['status'] == 'pending'])
+        'status':               'alive',
+        'drivers_online':       len(drivers),
+        'drivers_registered':   len(driver_list_full),
+        'pending_requests':     len([p for p in pending_codes.values() if p['status'] == 'pending'])
     })
 
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("🚕 TAXI 1229 SAMARKAND — SERVER STARTED")
-    print(f"🤖 Telegram bot: активен")
+    print("🚕 TAXI 3042 SERVER STARTED")
+    print("📍 Карта: /map")
     print("=" * 50)
     app.run(host='0.0.0.0', port=5000, debug=False)
