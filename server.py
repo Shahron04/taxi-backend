@@ -5,86 +5,25 @@ import time
 import threading
 import requests
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import json
 
 app = Flask(__name__)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-    return conn
-
-def init_db():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS driver_list (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            phone TEXT,
-            car_number TEXT,
-            pin TEXT,
-            balance INTEGER DEFAULT 50000,
-            status TEXT DEFAULT 'offline'
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS pending_codes (
-            pin_id TEXT PRIMARY KEY,
-            name TEXT,
-            phone TEXT,
-            car_number TEXT,
-            pin TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at REAL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
-            id SERIAL PRIMARY KEY,
-            car_number TEXT,
-            sender TEXT,
-            text TEXT,
-            time TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS balances (
-            car_number TEXT PRIMARY KEY,
-            balance INTEGER DEFAULT 50000
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS tariffs (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            base_fare INTEGER DEFAULT 5000,
-            city_rate INTEGER DEFAULT 2800,
-            suburb_rate INTEGER DEFAULT 3000,
-            wait_rate INTEGER DEFAULT 500
-        )''')
-        c.execute('''INSERT INTO tariffs (id, base_fare, city_rate, suburb_rate, wait_rate)
-                     VALUES (1, 5000, 2800, 3000, 500)
-                     ON CONFLICT (id) DO NOTHING''')
-        c.execute('''CREATE TABLE IF NOT EXISTS balance_requests (
-            id SERIAL PRIMARY KEY,
-            car_number TEXT,
-            amount INTEGER,
-            status TEXT DEFAULT 'pending',
-            created_at REAL
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS orders (
-            id SERIAL PRIMARY KEY,
-            order_num INTEGER,
-            car_number TEXT,
-            from_address TEXT,
-            to_address TEXT,
-            distance TEXT,
-            price INTEGER,
-            client TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at REAL
-        )''')
-        conn.commit()
-        conn.close()
-        print("✅ База данных инициализирована")
-    except Exception as e:
-        print(f"❌ Ошибка базы данных: {e}")
-
-init_db()
+# ==================== ДАННЫЕ В ПАМЯТИ ====================
+drivers          = {}
+order_counter    = 1000
+chat_messages    = {}
+balance_data     = {}
+pending_codes    = {}
+driver_list      = {}
+balance_requests = []
+orders_db        = []
+tariffs_data     = {
+    "base_fare":   5000,
+    "city_rate":   2800,
+    "suburb_rate": 3000,
+    "wait_rate":   500
+}
 
 # ==================== TELEGRAM BOT ====================
 TG_TOKEN   = "8757251631:AAHMFD4cg1dU9SdZ8-7HMDxy5qDUpSc5TIs"
@@ -95,49 +34,10 @@ def tg_send(text, reply_markup=None):
     try:
         data = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
         if reply_markup:
-            import json
             data["reply_markup"] = json.dumps(reply_markup)
         requests.post(f"{TG_API}/sendMessage", data=data, timeout=5)
     except Exception as e:
-        print(f"❌ Telegram error: {e}")
-
-def tg_notify_new_pin(pin_id, name, car, phone, pin):
-    text = (
-        f"🔑 <b>Новая заявка на регистрацию</b>\n\n"
-        f"👤 Имя: <b>{name}</b>\n"
-        f"🚗 Авто: <b>{car}</b>\n"
-        f"📱 Тел: <b>{phone}</b>\n\n"
-        f"🔐 ПИН-код: <b>{pin}</b>\n\n"
-        f"Нажмите кнопку:"
-    )
-    markup = {
-        "inline_keyboard": [[
-            {"text": "✅ Одобрить", "callback_data": f"approve:{pin_id}"},
-            {"text": "❌ Отказать", "callback_data": f"reject:{pin_id}"}
-        ]]
-    }
-    tg_send(text, markup)
-
-def tg_notify_balance_request(req_id, car, amount):
-    text = (
-        f"💰 <b>Заявка на пополнение баланса</b>\n\n"
-        f"🚗 Авто: <b>{car}</b>\n"
-        f"💵 Сумма: <b>{amount:,} сум</b>\n\n"
-        f"Подтвердите пополнение:"
-    )
-    markup = {
-        "inline_keyboard": [[
-            {"text": "✅ Одобрить", "callback_data": f"bal_approve:{req_id}"},
-            {"text": "❌ Отказать", "callback_data": f"bal_reject:{req_id}"}
-        ]]
-    }
-    tg_send(text, markup)
-
-def tg_notify_approved(name, car, pin):
-    tg_send(f"✅ <b>{name}</b> ({car}) одобрен!\nПИН: <b>{pin}</b>")
-
-def tg_notify_rejected(name, car):
-    tg_send(f"❌ Заявка <b>{name}</b> ({car}) отклонена")
+        print(f"Telegram error: {e}")
 
 def tg_answer_callback(callback_id, text):
     try:
@@ -146,90 +46,76 @@ def tg_answer_callback(callback_id, text):
     except:
         pass
 
-# ==================== ДАННЫЕ В ПАМЯТИ ====================
-drivers       = {}
-order_counter = 1000
+def tg_notify_new_pin(pin_id, name, car, phone, pin):
+    text = (
+        f"🔑 <b>Новая заявка на регистрацию</b>\n\n"
+        f"👤 Имя: <b>{name}</b>\n"
+        f"🚗 Авто: <b>{car}</b>\n"
+        f"📱 Тел: <b>{phone}</b>\n\n"
+        f"🔐 ПИН-код: <b>{pin}</b>"
+    )
+    markup = {"inline_keyboard": [[
+        {"text": "✅ Одобрить", "callback_data": f"approve:{pin_id}"},
+        {"text": "❌ Отказать", "callback_data": f"reject:{pin_id}"}
+    ]]}
+    tg_send(text, markup)
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+def tg_notify_balance_request(req_id, car, amount):
+    text = (
+        f"💰 <b>Заявка на пополнение баланса</b>\n\n"
+        f"🚗 Авто: <b>{car}</b>\n"
+        f"💵 Сумма: <b>{amount:,} сум</b>"
+    )
+    markup = {"inline_keyboard": [[
+        {"text": "✅ Одобрить", "callback_data": f"bal_approve:{req_id}"},
+        {"text": "❌ Отказать", "callback_data": f"bal_reject:{req_id}"}
+    ]]}
+    tg_send(text, markup)
+
+def tg_notify_approved(name, car, pin):
+    tg_send(f"✅ <b>{name}</b> ({car}) одобрен!\nПИН: <b>{pin}</b>")
+
+def tg_notify_rejected(name, car):
+    tg_send(f"❌ Заявка <b>{name}</b> ({car}) отклонена")
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
+def get_balance(car):
+    return balance_data.get(car, 50000)
+
+def set_balance(car, amount):
+    balance_data[car] = amount
+
 def get_tariffs_db():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM tariffs WHERE id = 1")
-        row = c.fetchone()
-        conn.close()
-        if row:
-            return dict(row)
-        return {"base_fare": 5000, "city_rate": 2800, "suburb_rate": 3000, "wait_rate": 500}
-    except:
-        return {"base_fare": 5000, "city_rate": 2800, "suburb_rate": 3000, "wait_rate": 500}
-
-def get_balance(car_number):
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT balance FROM balances WHERE car_number = %s", (car_number,))
-        row = c.fetchone()
-        conn.close()
-        return row["balance"] if row else 50000
-    except:
-        return 50000
-
-def set_balance(car_number, balance):
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''INSERT INTO balances (car_number, balance)
-                     VALUES (%s, %s)
-                     ON CONFLICT (car_number) DO UPDATE SET balance = %s''',
-                  (car_number, balance, balance))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"❌ set_balance error: {e}")
+    return tariffs_data
 
 def get_pending_codes_db():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM pending_codes ORDER BY created_at DESC")
-        rows = c.fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except:
-        return []
+    return sorted(pending_codes.values(),
+                  key=lambda x: 0 if x['status'] == 'pending' else 1)
 
 def get_driver_list_db():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM driver_list")
-        rows = c.fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except:
-        return []
+    return list(driver_list.values())
 
 def create_order_internal(car_number, from_addr, to_addr, price, client="Админ", distance="—"):
     global order_counter
     order_counter += 1
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        # ✅ Сначала отменяем старые pending заказы для этого водителя
-        c.execute("UPDATE orders SET status = 'cancelled' WHERE car_number = %s AND status = 'pending'",
-                  (car_number,))
-        c.execute('''INSERT INTO orders
-                     (order_num, car_number, from_address, to_address, distance, price, client, status, created_at)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s) RETURNING id''',
-                  (order_counter, car_number, from_addr, to_addr, distance, price, client, time.time()))
-        order_id = c.fetchone()["id"]
-        conn.commit()
-        conn.close()
-        return order_id
-    except Exception as e:
-        print(f"create_order error: {e}")
-        return None
+    # Отменяем старые заказы
+    for o in orders_db:
+        if o["car_number"] == car_number and o["status"] == "pending":
+            o["status"] = "cancelled"
+    order = {
+        "id":           order_counter,
+        "order_num":    order_counter,
+        "car_number":   car_number,
+        "from_address": from_addr,
+        "to_address":   to_addr,
+        "distance":     distance,
+        "price":        price,
+        "client":       client,
+        "status":       "pending",
+        "created_at":   time.time()
+    }
+    orders_db.append(order)
+    return order_counter
 
 # ==================== TELEGRAM POLLING ====================
 tg_offset = 0
@@ -239,8 +125,11 @@ def tg_polling():
     print("🤖 Telegram бот запущен")
     while True:
         try:
-            resp = requests.get(f"{TG_API}/getUpdates",
-                                params={"offset": tg_offset, "timeout": 30}, timeout=35)
+            resp = requests.get(
+                f"{TG_API}/getUpdates",
+                params={"offset": tg_offset, "timeout": 30},
+                timeout=35
+            )
             updates = resp.json().get("result", [])
 
             for upd in updates:
@@ -253,78 +142,47 @@ def tg_polling():
 
                     if data.startswith("approve:"):
                         pin_id = data.split(":", 1)[1]
-                        try:
-                            conn = get_db()
-                            c = conn.cursor()
-                            c.execute("SELECT * FROM pending_codes WHERE pin_id = %s", (pin_id,))
-                            info = c.fetchone()
-                            if info:
-                                c.execute("UPDATE pending_codes SET status = 'approved' WHERE pin_id = %s", (pin_id,))
-                                c.execute('''INSERT INTO driver_list (id, name, phone, car_number, pin, balance, status)
-                                             VALUES (%s, %s, %s, %s, %s, 50000, 'offline')
-                                             ON CONFLICT (id) DO NOTHING''',
-                                          (info["car_number"], info["name"], info["phone"],
-                                           info["car_number"], info["pin"]))
-                                conn.commit()
-                                conn.close()
-                                set_balance(info["car_number"], 50000)
-                                tg_answer_callback(cq_id, "✅ Одобрено!")
-                                tg_notify_approved(info["name"], info["car_number"], info["pin"])
-                            else:
-                                conn.close()
-                                tg_answer_callback(cq_id, "Заявка не найдена")
-                        except Exception as e:
-                            print(f"approve error: {e}")
+                        info   = pending_codes.get(pin_id)
+                        if info and info["status"] == "pending":
+                            info["status"] = "approved"
+                            car = info["car_number"]
+                            driver_list[car] = info
+                            set_balance(car, 50000)
+                            tg_answer_callback(cq_id, "✅ Одобрено!")
+                            tg_notify_approved(info["name"], car, info["pin"])
+                        else:
+                            tg_answer_callback(cq_id, "Заявка не найдена")
 
                     elif data.startswith("reject:"):
                         pin_id = data.split(":", 1)[1]
-                        try:
-                            conn = get_db()
-                            c = conn.cursor()
-                            c.execute("SELECT * FROM pending_codes WHERE pin_id = %s", (pin_id,))
-                            info = c.fetchone()
-                            if info:
-                                c.execute("UPDATE pending_codes SET status = 'rejected' WHERE pin_id = %s", (pin_id,))
-                                conn.commit()
-                                tg_answer_callback(cq_id, "❌ Отклонено")
-                                tg_notify_rejected(info["name"], info["car_number"])
-                            conn.close()
-                        except Exception as e:
-                            print(f"reject error: {e}")
+                        info   = pending_codes.get(pin_id)
+                        if info:
+                            info["status"] = "rejected"
+                            tg_answer_callback(cq_id, "❌ Отклонено")
+                            tg_notify_rejected(info["name"], info["car_number"])
 
                     elif data.startswith("bal_approve:"):
                         req_id = int(data.split(":", 1)[1])
-                        try:
-                            conn = get_db()
-                            c = conn.cursor()
-                            c.execute("SELECT * FROM balance_requests WHERE id = %s", (req_id,))
-                            req = c.fetchone()
-                            if req and req["status"] == "pending":
+                        for req in balance_requests:
+                            if req["id"] == req_id and req["status"] == "pending":
                                 car    = req["car_number"]
                                 amount = req["amount"]
                                 new_b  = get_balance(car) + amount
                                 set_balance(car, new_b)
                                 if car in drivers:
                                     drivers[car]["balance"] = new_b
-                                c.execute("UPDATE balance_requests SET status = 'approved' WHERE id = %s", (req_id,))
-                                conn.commit()
+                                req["status"] = "approved"
                                 tg_answer_callback(cq_id, "✅ Баланс пополнен!")
-                                tg_send(f"✅ Баланс <b>{car}</b> пополнен!\nНовый баланс: {new_b:,} сум")
-                            conn.close()
-                        except Exception as e:
-                            print(f"bal_approve error: {e}")
+                                tg_send(f"✅ Баланс <b>{car}</b> пополнен!\nНовый: {new_b:,} сум")
+                                break
 
                     elif data.startswith("bal_reject:"):
                         req_id = int(data.split(":", 1)[1])
-                        try:
-                            conn = get_db()
-                            c = conn.cursor()
-                            c.execute("UPDATE balance_requests SET status = 'rejected' WHERE id = %s", (req_id,))
-                            conn.commit()
-                            conn.close()
-                            tg_answer_callback(cq_id, "❌ Отклонено")
-                        except Exception as e:
-                            print(f"bal_reject error: {e}")
+                        for req in balance_requests:
+                            if req["id"] == req_id:
+                                req["status"] = "rejected"
+                                tg_answer_callback(cq_id, "❌ Отклонено")
+                                break
 
                 elif "message" in upd:
                     msg  = upd["message"]
@@ -343,27 +201,15 @@ def tg_polling():
                         )
 
                     elif text == "/status":
-                        # ✅ Исправлено - берём из БД тоже
-                        try:
-                            conn = get_db()
-                            c = conn.cursor()
-                            c.execute("SELECT COUNT(*) as cnt FROM driver_list")
-                            total_reg = c.fetchone()["cnt"]
-                            conn.close()
-                        except:
-                            total_reg = 0
-
                         online = sum(1 for d in drivers.values() if d.get("status") == "free")
                         busy   = sum(1 for d in drivers.values() if d.get("status") == "busy")
-                        total  = len(drivers)
-                        codes  = get_pending_codes_db()
-                        pend   = sum(1 for p in codes if p.get("status") == "pending")
+                        pend   = sum(1 for p in pending_codes.values() if p.get("status") == "pending")
                         tg_send(
                             f"📊 <b>Статус системы</b>\n\n"
                             f"🟢 Свободны: {online}\n"
                             f"🔴 На заказе: {busy}\n"
-                            f"📍 Сейчас онлайн: {total}\n"
-                            f"👥 Всего водителей: {total_reg}\n"
+                            f"📍 Сейчас онлайн: {len(drivers)}\n"
+                            f"👥 Всего водителей: {len(driver_list)}\n"
                             f"⏳ Ждут ПИН: {pend}"
                         )
 
@@ -374,12 +220,11 @@ def tg_polling():
                             lines = []
                             for d in drivers.values():
                                 icon = "🟢" if d.get("status") == "free" else "🔴"
-                                lines.append(f"{icon} {d['car_number']} — {d.get('driver_name', '—')}")
+                                lines.append(f"{icon} {d['car_number']} — {d.get('driver_name','—')}")
                             tg_send("🚗 <b>Водители онлайн:</b>\n" + "\n".join(lines))
 
                     elif text == "/pending":
-                        codes = get_pending_codes_db()
-                        plist = [p for p in codes if p.get("status") == "pending"]
+                        plist = [p for p in pending_codes.values() if p.get("status") == "pending"]
                         if not plist:
                             tg_send("✅ Нет новых заявок")
                         else:
@@ -448,14 +293,8 @@ ADMIN_HTML = """
         .no-data { text-align: center; padding: 30px; color: #444; }
         .refresh-bar { text-align: center; padding: 10px; color: #333; font-size: 12px; }
         .order-form { background: #1a1a1a; padding: 20px; border-radius: 10px; margin-bottom: 16px; }
-        .order-form input, .order-form select {
-            background: #111; color: #fff; border: 1px solid #333;
-            padding: 8px 12px; border-radius: 6px; margin: 4px; font-size: 13px;
-        }
-        .order-form button {
-            padding: 8px 20px; background: #FFD600; color: #000;
-            border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin: 4px;
-        }
+        .order-form input, .order-form select { background: #111; color: #fff; border: 1px solid #333; padding: 8px 12px; border-radius: 6px; margin: 4px; font-size: 13px; }
+        .order-form button { padding: 8px 20px; background: #FFD600; color: #000; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin: 4px; }
         .tariff-box { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 16px; }
         .tariff-item { background: #1a1a1a; padding: 16px; border-radius: 10px; text-align: center; min-width: 150px; }
         .tariff-item .val { font-size: 24px; font-weight: bold; color: #FFD600; }
@@ -472,7 +311,7 @@ ADMIN_HTML = """
 <body>
     <div class="header">
         <h1>🚕 TAXI 3042 XAZARASP</h1>
-        <p id="clock">{{ current_time }}</p>
+        <p>{{ current_time }}</p>
         <div class="tg-badge">🤖 Telegram бот активен</div>
     </div>
 
@@ -484,13 +323,12 @@ ADMIN_HTML = """
         <div class="stat-card"><div class="number">{{ registered_count }}</div><div class="label">Всего</div></div>
     </div>
 
-    <!-- Создать заказ -->
     <div class="section">
         <h2>📦 Создать заказ</h2>
         <div class="order-form">
             <select id="orderCar" style="width:220px;">
                 <option value="">-- Выбрать водителя --</option>
-                <option value="ALL">📢 Всем свободным водителям</option>
+                <option value="ALL">📢 Всем свободным</option>
                 {% for did, d in drivers_list %}
                 <option value="{{ d.car_number }}">{{ d.car_number }} — {{ d.driver_name or '—' }}</option>
                 {% endfor %}
@@ -503,7 +341,6 @@ ADMIN_HTML = """
         </div>
     </div>
 
-    <!-- Тарифы -->
     <div class="section">
         <h2>💰 Тарифы</h2>
         <div class="tariff-box">
@@ -521,7 +358,6 @@ ADMIN_HTML = """
         </div>
     </div>
 
-    <!-- Заявки на ПИН -->
     {% if pending_list %}
     <div class="section">
         <h2>🔑 Заявки на регистрацию</h2>
@@ -536,12 +372,12 @@ ADMIN_HTML = """
                 <td>
                     {% if p.status == 'pending' %}<span class="status-pending">⏳ Ожидает</span>
                     {% elif p.status == 'approved' %}<span class="status-approved">✅ Одобрен</span>
-                    {% else %}<span style="color:#555">❌ {{ p.status }}</span>{% endif %}
+                    {% else %}<span style="color:#555">❌</span>{% endif %}
                 </td>
                 <td>
                     {% if p.status == 'pending' %}
-                        <button class="btn btn-approve" onclick="approveCode('{{ p.pin_id }}')">✅ Одобрить</button>
-                        <button class="btn btn-reject" onclick="rejectCode('{{ p.pin_id }}')">❌ Отказ</button>
+                    <button class="btn btn-approve" onclick="approveCode('{{ p.pin_id }}')">✅ Одобрить</button>
+                    <button class="btn btn-reject" onclick="rejectCode('{{ p.pin_id }}')">❌ Отказ</button>
                     {% else %}<span style="color:#333">—</span>{% endif %}
                 </td>
             </tr>
@@ -550,10 +386,9 @@ ADMIN_HTML = """
     </div>
     {% endif %}
 
-    <!-- Заявки на баланс -->
     {% if balance_requests %}
     <div class="section">
-        <h2>💰 Заявки на пополнение баланса</h2>
+        <h2>💰 Заявки на баланс</h2>
         <table>
             <tr><th>Авто</th><th>Сумма</th><th>Статус</th><th>Действия</th></tr>
             {% for r in balance_requests %}
@@ -567,8 +402,8 @@ ADMIN_HTML = """
                 </td>
                 <td>
                     {% if r.status == 'pending' %}
-                        <button class="btn btn-approve" onclick="approveBalance({{ r.id }})">✅ Одобрить</button>
-                        <button class="btn btn-reject" onclick="rejectBalance({{ r.id }})">❌ Отказ</button>
+                    <button class="btn btn-approve" onclick="approveBalance({{ r.id }})">✅ Одобрить</button>
+                    <button class="btn btn-reject" onclick="rejectBalance({{ r.id }})">❌ Отказ</button>
                     {% else %}—{% endif %}
                 </td>
             </tr>
@@ -577,7 +412,6 @@ ADMIN_HTML = """
     </div>
     {% endif %}
 
-    <!-- Активные водители -->
     <div class="section">
         <h2>🚗 Активные водители</h2>
         {% if drivers_list %}
@@ -597,9 +431,9 @@ ADMIN_HTML = """
                 <td style="color:#4CAF50">{{ "{:,}".format(d.balance|int) }} сум</td>
                 <td style="color:#444">{{ d.time_str }}</td>
                 <td>
-                    <button class="btn btn-order" onclick="quickOrder('{{ d.car_number }}')">📦 Заказ</button>
-                    <button class="btn btn-chat" onclick="openChat('{{ d.car_number }}')">💬 Чат</button>
-                    <button class="btn btn-approve" onclick="addBalance('{{ d.car_number }}')">💰 Баланс</button>
+                    <button class="btn btn-order" onclick="quickOrder('{{ d.car_number }}')">📦</button>
+                    <button class="btn btn-chat" onclick="openChat('{{ d.car_number }}')">💬</button>
+                    <button class="btn btn-approve" onclick="addBalance('{{ d.car_number }}')">💰</button>
                     <button class="btn btn-danger" onclick="removeDriver('{{ did }}')">🗑</button>
                 </td>
             </tr>
@@ -610,29 +444,27 @@ ADMIN_HTML = """
         {% endif %}
     </div>
 
-    <!-- Чат -->
     <div class="section" id="chatSection" style="display:none;">
-        <h2>💬 Чат с водителем: <span id="chatCarNumber"></span></h2>
+        <h2>💬 Чат: <span id="chatCarNumber"></span></h2>
         <div class="chat-box" id="chatMessages" style="height:300px;overflow-y:auto;"></div>
         <div class="chat-input">
-            <input type="text" id="chatText" placeholder="Введите сообщение..." onkeypress="if(event.key==='Enter')sendChat()">
+            <input type="text" id="chatText" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendChat()">
             <button onclick="sendChat()">Отправить</button>
         </div>
         <div style="margin-top:8px;">
-            <button onclick="sendQuick('П��инято ✅')" class="btn btn-approve">Принято</button>
+            <button onclick="sendQuick('Принято ✅')" class="btn btn-approve">Принято</button>
             <button onclick="sendQuick('Подождите ⏳')" class="btn btn-reject">Подождите</button>
-            <button onclick="sendQuick('Есть заказ 📦')" class="btn btn-order">Есть заказ</button>
+            <button onclick="sendQuick('Есть заказ 📦')" class="btn btn-order">Заказ</button>
             <button onclick="sendQuick('Вы свободны 🟢')" class="btn btn-chat">Свободны</button>
             <button onclick="closeChat()" class="btn btn-danger">Закрыть</button>
         </div>
     </div>
 
-    <!-- Все водители -->
     {% if all_drivers_list %}
     <div class="section">
-        <h2>📋 Все зарегистрированные водители</h2>
+        <h2>📋 Все водители</h2>
         <table>
-            <tr><th>Имя</th><th>��елефон</th><th>Авто</th><th>ПИН</th><th>Баланс</th><th>Действия</th></tr>
+            <tr><th>Имя</th><th>Телефон</th><th>Авто</th><th>ПИН</th><th>Баланс</th><th>Действия</th></tr>
             {% for d in all_drivers_list %}
             <tr>
                 <td>{{ d.name }}</td>
@@ -641,8 +473,8 @@ ADMIN_HTML = """
                 <td><span class="pin-code">{{ d.pin }}</span></td>
                 <td style="color:#4CAF50">{{ "{:,}".format(d.balance|int) }} сум</td>
                 <td>
-                    <button class="btn btn-approve" onclick="addBalance('{{ d.car_number }}')">💰 +Баланс</button>
-                    <button class="btn btn-danger" onclick="deleteDriver('{{ d.car_number }}')">🗑 Удалить</button>
+                    <button class="btn btn-approve" onclick="addBalance('{{ d.car_number }}')">💰</button>
+                    <button class="btn btn-danger" onclick="deleteDriver('{{ d.car_number }}')">🗑</button>
                 </td>
             </tr>
             {% endfor %}
@@ -654,7 +486,6 @@ ADMIN_HTML = """
 
     <script>
         setTimeout(() => location.reload(), 3000);
-
         let currentCar = '';
         let chatLoaded = new Set();
         let chatInterval = null;
@@ -666,10 +497,9 @@ ADMIN_HTML = """
             document.getElementById('chatMessages').innerHTML = '';
             chatLoaded.clear();
             loadChat();
-            // ✅ Обновляем чат кажд��е 2 секунды
             if (chatInterval) clearInterval(chatInterval);
             chatInterval = setInterval(loadChat, 2000);
-            document.getElementById('chatSection').scrollIntoView({behavior: 'smooth'});
+            document.getElementById('chatSection').scrollIntoView({behavior:'smooth'});
         }
 
         function closeChat() {
@@ -688,7 +518,6 @@ ADMIN_HTML = """
                         if (chatLoaded.has(m.id)) return;
                         chatLoaded.add(m.id);
                         const div = document.createElement('div');
-                        // ✅ dispatcher = справа (own), driver = слева (other)
                         div.className = 'chat-msg ' + (m.from === 'dispatcher' ? 'own' : 'other');
                         div.innerHTML = `<b>${m.from === 'dispatcher' ? 'Диспетчер' : m.car_number}</b>: ${m.text} <small style="opacity:0.5">${m.time}</small>`;
                         box.appendChild(div);
@@ -709,7 +538,7 @@ ADMIN_HTML = """
         }
 
         function sendQuick(text) {
-            if (!currentCar) { alert('Сначала откройте чат с водителем!'); return; }
+            if (!currentCar) { alert('Откройте чат!'); return; }
             fetch('/api/chat/dispatch', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -730,7 +559,7 @@ ADMIN_HTML = """
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({car_number: car, from_address: from, to_address: to, price: parseInt(price), client: client})
             }).then(r => r.json()).then(d => {
-                alert(d.success ? '✅ Заказ отправлен!' : '❌ Ошибка: ' + (d.error || ''));
+                alert(d.success ? '✅ Заказ отправлен!' : '❌ ' + (d.error || ''));
                 location.reload();
             });
         }
@@ -738,7 +567,7 @@ ADMIN_HTML = """
         function quickOrder(car) {
             document.getElementById('orderCar').value = car;
             document.getElementById('orderFrom').focus();
-            document.querySelector('.section').scrollIntoView({behavior: 'smooth'});
+            window.scrollTo({top:0, behavior:'smooth'});
         }
 
         function saveTariffs() {
@@ -746,53 +575,46 @@ ADMIN_HTML = """
             const city   = document.getElementById('tCity').value;
             const suburb = document.getElementById('tSuburb').value;
             const wait   = document.getElementById('tWait').value;
-            if (!base || !city || !suburb || !wait) { alert('Заполните все тарифы!'); return; }
+            if (!base||!city||!suburb||!wait) { alert('Заполните все!'); return; }
             fetch('/api/tariffs', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({base_fare: parseInt(base), city_rate: parseInt(city), suburb_rate: parseInt(suburb), wait_rate: parseInt(wait)})
-            }).then(() => { alert('✅ Тарифы сохранены!'); location.reload(); });
+                body: JSON.stringify({base_fare:parseInt(base),city_rate:parseInt(city),suburb_rate:parseInt(suburb),wait_rate:parseInt(wait)})
+            }).then(() => { alert('✅ Сохранено!'); location.reload(); });
         }
 
         function approveCode(pinId) {
-            if (!confirm('Одобрить заявку?')) return;
+            if (!confirm('Одобрить?')) return;
             fetch('/api/admin/approve_code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({pin_id: pinId})
-            }).then(r => r.json()).then(d => {
-                alert(d.success ? '✅ Одобрено!' : '❌ Ошибка');
-                location.reload();
-            });
+            }).then(r=>r.json()).then(d=>{ alert(d.success?'✅':'❌'); location.reload(); });
         }
 
         function rejectCode(pinId) {
-            if (!confirm('Отклон��ть?')) return;
+            if (!confirm('Отклонить?')) return;
             fetch('/api/admin/reject_code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({pin_id: pinId})
             }).then(() => location.reload());
         }
 
         function addBalance(car) {
-            const amount = prompt('Введите сумму пополнения для ' + car + ':');
+            const amount = prompt('Сумма для ' + car + ':');
             if (!amount || isNaN(amount) || parseInt(amount) <= 0) return;
             fetch('/api/admin/add_balance', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({car_number: car, amount: parseInt(amount)})
-            }).then(r => r.json()).then(d => {
-                alert(d.success ? '✅ Баланс пополнен! Новый: ' + d.new_balance.toLocaleString() + ' сум' : '❌ Ошибка');
+            }).then(r=>r.json()).then(d=>{
+                alert(d.success ? '✅ ' + d.new_balance.toLocaleString() + ' сум' : '❌');
                 location.reload();
             });
         }
 
         function approveBalance(id) {
-            if (!confirm('Одобрить пополнение?')) return;
+            if (!confirm('Одобрить?')) return;
             fetch('/api/admin/approve_balance', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({id: id})
             }).then(() => location.reload());
         }
@@ -800,26 +622,23 @@ ADMIN_HTML = """
         function rejectBalance(id) {
             if (!confirm('Отклонить?')) return;
             fetch('/api/admin/reject_balance', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({id: id})
             }).then(() => location.reload());
         }
 
         function removeDriver(did) {
-            if (!confirm('Убрать из онлайн?')) return;
+            if (!confirm('Убрать?')) return;
             fetch('/remove_driver', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({driver: did})
             }).then(() => location.reload());
         }
 
         function deleteDriver(car) {
-            if (!confirm('Полностью удалить ' + car + '?')) return;
+            if (!confirm('Удалить ' + car + '?')) return;
             fetch('/api/admin/delete_driver', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                method:'POST', headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({car_number: car})
             }).then(() => location.reload());
         }
@@ -832,634 +651,371 @@ ADMIN_HTML = """
 @app.route('/map')
 def map_page():
     api_key = "AIzaSyDbbgIqjyOqzS7gozVqmZ_V4G1T6cpKXC0"
-    map_html = f"""
-<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Карта водителей — TAXI 3042</title>
-    <style>
-        * {{ margin:0; padding:0; box-sizing:border-box; }}
-        body {{ background:#111; }}
-        #map {{ width:100vw; height:100vh; }}
-        #info {{ position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.8);
-                 color:#FFD600; padding:10px 16px; border-radius:10px; font-size:13px; z-index:100; }}
-    </style>
+    <title>Карта — TAXI 3042</title>
+    <style>*{{margin:0;padding:0;}}#map{{width:100vw;height:100vh;}}
+    #info{{position:absolute;top:10px;right:10px;background:rgba(0,0,0,0.8);color:#FFD600;padding:10px 16px;border-radius:10px;font-size:13px;z-index:100;}}</style>
 </head>
 <body>
-    <div id="map"></div>
-    <div id="info">🚗 Водителей онлайн: <b id="count">0</b></div>
-    <script>
-        let map, markers = {{}}, infoWindows = {{}};
-        let firstLoad = true;
-
-        function initMap() {{
-            map = new google.maps.Map(document.getElementById("map"), {{
-                center: {{ lat: 41.3069, lng: 61.0838 }},
-                zoom: 12,
-                styles: [
-                    {{ elementType: "geometry", stylers: [{{ color: "#1a1a2e" }}] }},
-                    {{ elementType: "labels.text.fill", stylers: [{{ color: "#8ec3b9" }}] }},
-                    {{ featureType: "road", elementType: "geometry", stylers: [{{ color: "#304a7d" }}] }},
-                    {{ featureType: "water", elementType: "geometry", stylers: [{{ color: "#0e1626" }}] }}
-                ]
-            }});
-            updateDrivers();
-            setInterval(updateDrivers, 2000);
-        }}
-
-        function updateDrivers() {{
-            fetch("/api/drivers")
-                .then(r => r.json())
-                .then(data => {{
-                    document.getElementById('count').textContent = Object.keys(data).length;
-                    let bounds = new google.maps.LatLngBounds();
-                    let hasDrivers = false;
-
-                    Object.keys(markers).forEach(key => {{
-                        if (!data[key]) {{
-                            markers[key].setMap(null);
-                            delete markers[key];
-                            if (infoWindows[key]) {{
-                                infoWindows[key].close();
-                                delete infoWindows[key];
-                            }}
-                        }}
+<div id="map"></div>
+<div id="info">🚗 Онлайн: <b id="cnt">0</b></div>
+<script>
+    let map,markers={{}},iws={{}},first=true;
+    function initMap(){{
+        map=new google.maps.Map(document.getElementById('map'),{{
+            center:{{lat:41.3069,lng:61.0838}},zoom:12,
+            styles:[{{elementType:'geometry',stylers:[{{color:'#1a1a2e'}}]}},
+                    {{featureType:'road',elementType:'geometry',stylers:[{{color:'#304a7d'}}]}},
+                    {{featureType:'water',elementType:'geometry',stylers:[{{color:'#0e1626'}}]}}]
+        }});
+        update();setInterval(update,2000);
+    }}
+    function update(){{
+        fetch('/api/drivers').then(r=>r.json()).then(data=>{{
+            document.getElementById('cnt').textContent=Object.keys(data).length;
+            let bounds=new google.maps.LatLngBounds(),has=false;
+            Object.keys(markers).forEach(k=>{{if(!data[k]){{markers[k].setMap(null);delete markers[k];}}}});
+            for(let k in data){{
+                let d=data[k],lat=parseFloat(d.lat),lng=parseFloat(d.lng);
+                if(isNaN(lat)||isNaN(lng))continue;
+                let pos={{lat,lng}};bounds.extend(pos);has=true;
+                let icon={{url:d.status==='free'?'https://maps.google.com/mapfiles/ms/icons/green-dot.png':'https://maps.google.com/mapfiles/ms/icons/red-dot.png',scaledSize:new google.maps.Size(40,40)}};
+                if(markers[k]){{markers[k].setPosition(pos);markers[k].setIcon(icon);}}
+                else{{
+                    markers[k]=new google.maps.Marker({{position:pos,map,title:d.car_number,icon,
+                        label:{{text:d.car_number,color:'#FFD600',fontSize:'11px',fontWeight:'bold'}}}});
+                    markers[k].addListener('click',()=>{{
+                        Object.values(iws).forEach(w=>w.close());
+                        iws[k]=new google.maps.InfoWindow({{content:`<div style="background:#1a1a1a;color:#fff;padding:12px;border-radius:8px;min-width:180px;">
+                            <b style="color:#FFD600">🚗 ${{d.car_number}}</b><br><br>
+                            👤 ${{d.driver_name||'—'}}<br>
+                            📍 ${{d.status==='free'?'🟢 Свободен':'🔴 На заказе'}}<br>
+                            ⚡ ${{d.speed}} км/ч<br>
+                            💰 ${{parseInt(d.balance||0).toLocaleString()}} сум</div>`}});
+                        iws[k].open(map,markers[k]);
                     }});
+                }}
+            }}
+            if(has&&first){{first=false;map.fitBounds(bounds);if(Object.keys(data).length===1)map.setZoom(14);}}
+        }});
+    }}
+</script>
+<script async defer src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initMap"></script>
+</body></html>"""
 
-                    for (let key in data) {{
-                        let d   = data[key];
-                        let lat = parseFloat(d.lat);
-                        let lng = parseFloat(d.lng);
-                        if (isNaN(lat) || isNaN(lng)) continue;
-                        let pos = {{ lat: lat, lng: lng }};
-                        bounds.extend(pos);
-                        hasDrivers = true;
-
-                        if (markers[key]) {{
-                            markers[key].setPosition(pos);
-                            markers[key].setIcon({{
-                                url: d.status === "free"
-                                    ? "https://maps.google.com/mapfiles/ms/icons/green-dot.png"
-                                    : "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
-                                scaledSize: new google.maps.Size(40, 40)
-                            }});
-                        }} else {{
-                            markers[key] = new google.maps.Marker({{
-                                position: pos,
-                                map: map,
-                                title: d.car_number,
-                                icon: {{
-                                    url: d.status === "free"
-                                        ? "https://maps.google.com/mapfiles/ms/icons/green-dot.png"
-                                        : "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
-                                    scaledSize: new google.maps.Size(40, 40)
-                                }},
-                                label: {{
-                                    text: d.car_number,
-                                    color: "#FFD600",
-                                    fontSize: "11px",
-                                    fontWeight: "bold"
-                                }}
-                            }});
-
-                            markers[key].addListener("click", () => {{
-                                Object.values(infoWindows).forEach(w => w.close());
-                                infoWindows[key] = new google.maps.InfoWindow({{
-                                    content: `
-                                        <div style="background:#1a1a1a;color:#fff;padding:12px;border-radius:10px;min-width:200px;">
-                                            <b style="color:#FFD600;font-size:15px;">🚗 ${{d.car_number}}</b><br><br>
-                                            👤 ${{d.driver_name || '—'}}<br>
-                                            📱 ${{d.phone || '—'}}<br>
-                                            📍 <b style="color:${{d.status==='free'?'#4CAF50':'#FF5252'}}">
-                                                ${{d.status==='free'?'🟢 Свободен':'🔴 На заказе'}}
-                                            </b><br>
-                                            ⚡ ${{d.speed}} км/ч<br>
-                                            💰 ${{parseInt(d.balance||0).toLocaleString()}} сум<br>
-                                            <small style="color:#555;">🕐 ${{d.time_str}}</small>
-                                        </div>`
-                                }});
-                                infoWindows[key].open(map, markers[key]);
-                            }});
-                        }}
-                    }}
-
-                    if (hasDrivers && firstLoad) {{
-                        firstLoad = false;
-                        map.fitBounds(bounds);
-                        if (Object.keys(data).length === 1) {{
-                            map.setZoom(14);
-                        }}
-                    }}
-                }})
-                .catch(err => console.log("Ошибка:", err));
-        }}
-    </script>
-    <script async defer
-        src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initMap">
-    </script>
-</body>
-</html>
-"""
-    return map_html
-
-# ==================== ЭНДПОИНТЫ ====================
-
+# ==================== РОУТЫ ====================
 @app.route('/')
 def index():
-    free          = sum(1 for d in drivers.values() if d.get('status') == 'free')
-    busy          = sum(1 for d in drivers.values() if d.get('status') == 'busy')
-    codes         = get_pending_codes_db()
-    pending_count = sum(1 for p in codes if p.get('status') == 'pending')
-    all_drivers   = get_driver_list_db()
-    tariffs       = get_tariffs_db()
-
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM balance_requests ORDER BY created_at DESC LIMIT 20")
-        balance_requests = [dict(r) for r in c.fetchall()]
-        conn.close()
-    except:
-        balance_requests = []
-
-    pending_list     = sorted(codes, key=lambda x: 0 if x['status'] == 'pending' else 1)
     all_drivers_list = [{
-        "name":       d["name"],
-        "phone":      d["phone"],
-        "car_number": d["car_number"],
-        "pin":        d["pin"],
-        "balance":    get_balance(d["car_number"])
-    } for d in all_drivers]
+        "name":       d.get("name", ""),
+        "phone":      d.get("phone", ""),
+        "car_number": d.get("car_number", car),
+        "pin":        d.get("pin", ""),
+        "balance":    get_balance(car)
+    } for car, d in driver_list.items()]
 
     return render_template_string(
         ADMIN_HTML,
         current_time     = datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
         total_drivers    = len(drivers),
-        free_drivers     = free,
-        busy_drivers     = busy,
-        pending_count    = pending_count,
-        registered_count = len(all_drivers),
+        free_drivers     = sum(1 for d in drivers.values() if d.get('status') == 'free'),
+        busy_drivers     = sum(1 for d in drivers.values() if d.get('status') == 'busy'),
+        pending_count    = sum(1 for p in pending_codes.values() if p.get('status') == 'pending'),
+        registered_count = len(driver_list),
         drivers_list     = list(drivers.items()),
-        pending_list     = pending_list,
+        pending_list     = get_pending_codes_db(),
+        balance_requests = sorted(balance_requests, key=lambda x: x['id'], reverse=True)[:20],
         all_drivers_list = all_drivers_list,
-        balance_requests = balance_requests,
-        tariffs          = tariffs
+        tariffs          = get_tariffs_db()
     )
-
 
 @app.route('/api/driver/register', methods=['POST'])
 def register_driver():
-    data       = request.json
-    phone      = data.get('phone', '')
-    car_number = data.get('car_number', '')
-    name       = data.get('name', 'Новый водитель')
-    pin        = str(random.randint(1000, 9999))
-    pin_id     = f"pin_{int(time.time())}_{random.randint(100,999)}"
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''INSERT INTO pending_codes (pin_id, name, phone, car_number, pin, status, created_at)
-                     VALUES (%s, %s, %s, %s, %s, 'pending', %s)''',
-                  (pin_id, name, phone, car_number, pin, time.time()))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"register error: {e}")
-    tg_notify_new_pin(pin_id, name, car_number, phone, pin)
-    return jsonify({"success": True, "message": "Заявка отправлена администратору"})
-
-
-@app.route('/api/admin/pending_codes', methods=['GET'])
-def get_pending_codes():
-    return jsonify(get_pending_codes_db())
-
-
-@app.route('/api/admin/pending_by_car', methods=['GET'])
-def pending_by_car():
-    codes  = get_pending_codes_db()
-    result = {}
-    for info in codes:
-        if info.get('status') == 'pending':
-            car = info.get('car_number', '')
-            pin = info.get('pin', '')
-            if car and pin:
-                result[car] = pin
-    return jsonify(result)
-
-
-@app.route('/api/admin/approve_code', methods=['POST'])
-def approve_code():
     data   = request.json
-    pin_id = data.get('pin_id', '')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM pending_codes WHERE pin_id = %s", (pin_id,))
-        info = c.fetchone()
-        if not info:
-            conn.close()
-            return jsonify({"success": False, "error": "Заявка не найдена"}), 404
-        c.execute("UPDATE pending_codes SET status = 'approved' WHERE pin_id = %s", (pin_id,))
-        c.execute('''INSERT INTO driver_list (id, name, phone, car_number, pin, balance, status)
-                     VALUES (%s, %s, %s, %s, %s, 50000, 'offline')
-                     ON CONFLICT (id) DO NOTHING''',
-                  (info["car_number"], info["name"], info["phone"], info["car_number"], info["pin"]))
-        conn.commit()
-        conn.close()
-        set_balance(info["car_number"], 50000)
-        tg_notify_approved(info["name"], info["car_number"], info["pin"])
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route('/api/admin/reject_code', methods=['POST'])
-def reject_code():
-    data   = request.json
-    pin_id = data.get('pin_id', '')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM pending_codes WHERE pin_id = %s", (pin_id,))
-        info = c.fetchone()
-        if info:
-            c.execute("UPDATE pending_codes SET status = 'rejected' WHERE pin_id = %s", (pin_id,))
-            conn.commit()
-            tg_notify_rejected(info["name"], info["car_number"])
-        conn.close()
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-@app.route('/api/admin/delete_driver', methods=['POST'])
-def delete_driver():
-    data = request.json
-    car  = data.get('car_number', '')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("DELETE FROM driver_list WHERE car_number = %s", (car,))
-        c.execute("DELETE FROM balances WHERE car_number = %s", (car,))
-        conn.commit()
-        conn.close()
-        if car in drivers:
-            del drivers[car]
-        tg_send(f"🗑 Водитель {car} удалён из системы")
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-
-@app.route('/api/admin/add_balance', methods=['POST'])
-def admin_add_balance():
-    data   = request.json
+    phone  = data.get('phone', '')
     car    = data.get('car_number', '')
-    amount = int(data.get('amount', 0))
-    if amount <= 0:
-        return jsonify({"success": False, "error": "Неверная сумма"})
-    old_b = get_balance(car)
-    new_b = old_b + amount
-    set_balance(car, new_b)
-    if car in drivers:
-        drivers[car]['balance'] = new_b
-    tg_send(f"💰 Баланс {car} пополнен на {amount:,} сум\nНовый баланс: {new_b:,} сум")
-    return jsonify({"success": True, "new_balance": new_b})
-
-
-@app.route('/api/balance/request', methods=['POST'])
-def request_balance():
-    data   = request.json
-    car    = data.get('car_number', '')
-    amount = int(data.get('amount', 0))
-    if amount <= 0:
-        return jsonify({"success": False, "error": "Неверная сумма"})
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''INSERT INTO balance_requests (car_number, amount, status, created_at)
-                     VALUES (%s, %s, 'pending', %s) RETURNING id''',
-                  (car, amount, time.time()))
-        req_id = c.fetchone()["id"]
-        conn.commit()
-        conn.close()
-        tg_notify_balance_request(req_id, car, amount)
-        return jsonify({"success": True, "message": "Заявка отправлена администратору"})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-
-@app.route('/api/admin/approve_balance', methods=['POST'])
-def approve_balance():
-    data   = request.json
-    req_id = int(data.get('id', 0))
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM balance_requests WHERE id = %s", (req_id,))
-        req = c.fetchone()
-        if req and req["status"] == "pending":
-            car    = req["car_number"]
-            amount = req["amount"]
-            new_b  = get_balance(car) + amount
-            set_balance(car, new_b)
-            if car in drivers:
-                drivers[car]["balance"] = new_b
-            c.execute("UPDATE balance_requests SET status = 'approved' WHERE id = %s", (req_id,))
-            conn.commit()
-            tg_send(f"✅ Баланс {car} пополнен на {amount:,} сум\nНовый: {new_b:,} сум")
-        conn.close()
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-
-@app.route('/api/admin/reject_balance', methods=['POST'])
-def reject_balance():
-    data   = request.json
-    req_id = int(data.get('id', 0))
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE balance_requests SET status = 'rejected' WHERE id = %s", (req_id,))
-        conn.commit()
-        conn.close()
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
+    name   = data.get('name', 'Водитель')
+    pin    = str(random.randint(1000, 9999))
+    pin_id = f"pin_{int(time.time())}_{random.randint(100,999)}"
+    pending_codes[pin_id] = {
+        "pin_id":     pin_id,
+        "name":       name,
+        "phone":      phone,
+        "car_number": car,
+        "pin":        pin,
+        "status":     "pending",
+        "created_at": time.time()
+    }
+    tg_notify_new_pin(pin_id, name, car, phone, pin)
+    return jsonify({"success": True, "message": "Заявка отправлена"})
 
 @app.route('/api/driver/login', methods=['POST'])
 def driver_login():
     data = request.json
     pin  = data.get('pin', '')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM driver_list WHERE pin = %s", (pin,))
-        driver = c.fetchone()
-        conn.close()
-        if driver:
-            balance = get_balance(driver["car_number"])
-            return jsonify({"success": True, "driver_id": driver["id"],
-                            "name": driver["name"], "balance": balance})
-    except Exception as e:
-        print(f"login error: {e}")
-
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM pending_codes WHERE pin = %s AND status = 'pending'", (pin,))
-        info = c.fetchone()
-        if info:
-            c.execute("UPDATE pending_codes SET status = 'approved' WHERE pin_id = %s", (info["pin_id"],))
-            c.execute('''INSERT INTO driver_list (id, name, phone, car_number, pin, balance, status)
-                         VALUES (%s, %s, %s, %s, %s, 50000, 'offline')
-                         ON CONFLICT (id) DO NOTHING''',
-                      (info["car_number"], info["name"], info["phone"], info["car_number"], info["pin"]))
-            conn.commit()
-            conn.close()
-            set_balance(info["car_number"], 50000)
-            tg_notify_approved(info["name"], info["car_number"], info["pin"])
-            return jsonify({"success": True, "driver_id": info["car_number"],
-                            "name": info["name"], "balance": 50000})
-        conn.close()
-    except Exception as e:
-        print(f"login pending error: {e}")
-
+    for car, d in driver_list.items():
+        if d.get('pin') == pin:
+            return jsonify({"success": True, "driver_id": car,
+                            "name": d.get('name', ''), "balance": get_balance(car)})
+    for pid, info in pending_codes.items():
+        if info.get('pin') == pin and info.get('status') == 'pending':
+            info['status'] = 'approved'
+            car = info['car_number']
+            driver_list[car] = info
+            set_balance(car, 50000)
+            tg_notify_approved(info['name'], car, pin)
+            return jsonify({"success": True, "driver_id": car,
+                            "name": info.get('name', ''), "balance": 50000})
     return jsonify({"success": False, "error": "Неверный ПИН"}), 401
 
+@app.route('/api/admin/pending_codes', methods=['GET'])
+def get_pending_codes_route():
+    return jsonify(get_pending_codes_db())
+
+@app.route('/api/admin/pending_by_car', methods=['GET'])
+def pending_by_car():
+    result = {}
+    for info in pending_codes.values():
+        if info.get('status') == 'pending':
+            result[info['car_number']] = info['pin']
+    return jsonify(result)
+
+@app.route('/api/admin/approve_code', methods=['POST'])
+def approve_code():
+    pin_id = request.json.get('pin_id', '')
+    info   = pending_codes.get(pin_id)
+    if not info:
+        return jsonify({"success": False, "error": "Не найдено"})
+    info['status'] = 'approved'
+    car = info['car_number']
+    driver_list[car] = info
+    set_balance(car, 50000)
+    tg_notify_approved(info['name'], car, info['pin'])
+    return jsonify({"success": True})
+
+@app.route('/api/admin/reject_code', methods=['POST'])
+def reject_code():
+    pin_id = request.json.get('pin_id', '')
+    info   = pending_codes.get(pin_id)
+    if info:
+        info['status'] = 'rejected'
+        tg_notify_rejected(info['name'], info['car_number'])
+    return jsonify({"success": True})
+
+@app.route('/api/admin/delete_driver', methods=['POST'])
+def delete_driver():
+    car = request.json.get('car_number', '')
+    driver_list.pop(car, None)
+    drivers.pop(car, None)
+    tg_send(f"🗑 Водитель {car} удалён")
+    return jsonify({"success": True})
+
+@app.route('/api/admin/add_balance', methods=['POST'])
+def admin_add_balance():
+    car    = request.json.get('car_number', '')
+    amount = int(request.json.get('amount', 0))
+    if amount <= 0:
+        return jsonify({"success": False})
+    new_b = get_balance(car) + amount
+    set_balance(car, new_b)
+    if car in drivers:
+        drivers[car]['balance'] = new_b
+    tg_send(f"💰 {car}: +{amount:,} → {new_b:,} сум")
+    return jsonify({"success": True, "new_balance": new_b})
+
+@app.route('/api/balance/request', methods=['POST'])
+def request_balance():
+    car    = request.json.get('car_number', '')
+    amount = int(request.json.get('amount', 0))
+    if amount <= 0:
+        return jsonify({"success": False})
+    req_id = len(balance_requests) + 1
+    balance_requests.append({
+        "id": req_id, "car_number": car,
+        "amount": amount, "status": "pending", "created_at": time.time()
+    })
+    tg_notify_balance_request(req_id, car, amount)
+    return jsonify({"success": True})
+
+@app.route('/api/admin/approve_balance', methods=['POST'])
+def approve_balance():
+    req_id = int(request.json.get('id', 0))
+    for req in balance_requests:
+        if req['id'] == req_id and req['status'] == 'pending':
+            car   = req['car_number']
+            new_b = get_balance(car) + req['amount']
+            set_balance(car, new_b)
+            if car in drivers:
+                drivers[car]['balance'] = new_b
+            req['status'] = 'approved'
+            tg_send(f"✅ {car}: +{req['amount']:,} → {new_b:,} сум")
+            break
+    return jsonify({"success": True})
+
+@app.route('/api/admin/reject_balance', methods=['POST'])
+def reject_balance():
+    req_id = int(request.json.get('id', 0))
+    for req in balance_requests:
+        if req['id'] == req_id:
+            req['status'] = 'rejected'
+            break
+    return jsonify({"success": True})
 
 @app.route('/api/driver/<driver_id>/balance', methods=['GET'])
 def get_driver_balance(driver_id):
-    balance = get_balance(driver_id)
-    name    = drivers.get(driver_id, {}).get("driver_name", "")
-    return jsonify({"balance": balance, "name": name})
-
+    return jsonify({"balance": get_balance(driver_id)})
 
 @app.route('/api/tariffs', methods=['GET'])
 def get_tariffs():
     return jsonify(get_tariffs_db())
 
-
 @app.route('/api/tariffs', methods=['POST'])
 def update_tariffs():
     data = request.get_json(force=True)
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''UPDATE tariffs SET base_fare=%s, city_rate=%s, suburb_rate=%s, wait_rate=%s WHERE id=1''',
-                  (int(data.get('base_fare', 5000)), int(data.get('city_rate', 2800)),
-                   int(data.get('suburb_rate', 3000)), int(data.get('wait_rate', 500))))
-        conn.commit()
-        conn.close()
-        tg_send(f"💰 Тарифы обновлены:\nПосадка: {data.get('base_fare')} сум\n"
-                f"Город: {data.get('city_rate')} сум/км\nЗагород: {data.get('suburb_rate')} сум/км\n"
-                f"Ожидание: {data.get('wait_rate')} сум/мин")
-        return jsonify({'status': 'ok'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'error': str(e)})
-
+    tariffs_data.update({
+        "base_fare":   int(data.get('base_fare',   5000)),
+        "city_rate":   int(data.get('city_rate',   2800)),
+        "suburb_rate": int(data.get('suburb_rate', 3000)),
+        "wait_rate":   int(data.get('wait_rate',   500))
+    })
+    tg_send(f"💰 Тарифы обновлены")
+    return jsonify({'status': 'ok'})
 
 @app.route('/location', methods=['POST'])
 def location():
-    data    = request.get_json(force=True)
-    did     = data.get('driver', data.get('car_number', 'unknown'))
-    balance = get_balance(did)
+    data = request.get_json(force=True)
+    did  = data.get('driver', data.get('car_number', 'unknown'))
+    bal  = get_balance(did)
     drivers[did] = {
         'lat':         data.get('lat', 0),
         'lng':         data.get('lng', 0),
         'speed':       data.get('speed', 0),
         'status':      data.get('status', 'free'),
         'car_number':  data.get('car_number', did),
-        'balance':     balance,
+        'balance':     bal,
         'phone':       data.get('phone', ''),
         'driver_name': data.get('driver_name', ''),
         'time_str':    datetime.now().strftime('%H:%M:%S'),
         'timestamp':   time.time()
     }
-    return jsonify({'status': 'ok', 'balance': balance})
-
+    return jsonify({'status': 'ok', 'balance': bal})
 
 @app.route('/api/drivers', methods=['GET'])
 def get_drivers():
     return jsonify(drivers)
 
-
 @app.route('/remove_driver', methods=['POST'])
 def remove_driver():
     data = request.get_json(force=True)
     did  = data.get('driver', data.get('car_number', ''))
-    if did in drivers:
-        del drivers[did]
+    drivers.pop(did, None)
     return jsonify({'status': 'ok'})
-
 
 @app.route('/api/balance', methods=['POST'])
 def update_balance():
     data   = request.get_json(force=True)
     did    = data.get('driver', '')
     amount = int(data.get('amount', 0))
-    old_b  = get_balance(did)
-    new_b  = old_b + amount
+    new_b  = get_balance(did) + amount
     set_balance(did, new_b)
     if did in drivers:
         drivers[did]['balance'] = new_b
-    if amount != 0:
-        sign = "+" if amount > 0 else ""
-        tg_send(f"💰 Баланс {did}: {sign}{amount:,} сум → {new_b:,} сум")
     return jsonify({'status': 'ok', 'new_balance': new_b})
-
 
 @app.route('/admin/block_driver', methods=['POST'])
 def block_driver():
-    data = request.get_json(force=True)
-    car  = data.get('car_number', '')
+    car = request.get_json(force=True).get('car_number', '')
     if car in drivers:
         drivers[car]['status'] = 'blocked'
-    tg_send(f"🚫 Водитель {car} заблокирован")
+    tg_send(f"🚫 {car} заблокирован")
     return jsonify({'status': 'ok'})
-
 
 @app.route('/api/orders/create', methods=['POST'])
 def create_order():
-    data      = request.json
-    car       = data.get('car_number', '')
-    from_addr = data.get('from_address', '')
-    to_addr   = data.get('to_address', '')
-    price     = int(data.get('price', 0))
-    client    = data.get('client', 'Клиент')
-    distance  = data.get('distance', '—')
-    order_id  = create_order_internal(car, from_addr, to_addr, price, client, distance)
-    tg_send(f"📦 Заказ назначен <b>{car}</b>\n📍 {from_addr} → {to_addr}\n💰 {price:,} сум")
+    data     = request.json
+    car      = data.get('car_number', '')
+    from_a   = data.get('from_address', '')
+    to_a     = data.get('to_address', '')
+    price    = int(data.get('price', 0))
+    client   = data.get('client', 'Клиент')
+    distance = data.get('distance', '—')
+    order_id = create_order_internal(car, from_a, to_a, price, client, distance)
+    tg_send(f"📦 Заказ → {car}\n{from_a} → {to_a}\n💰 {price:,} сум")
     return jsonify({"success": True, "order_id": order_id})
-
 
 @app.route('/api/orders/broadcast', methods=['POST'])
 def broadcast_order():
-    data      = request.json
-    from_addr = data.get('from_address', '')
-    to_addr   = data.get('to_address', '')
-    price     = int(data.get('price', 0))
-    client    = data.get('client', 'Клиент')
+    data   = request.json
+    from_a = data.get('from_address', '')
+    to_a   = data.get('to_address', '')
+    price  = int(data.get('price', 0))
+    client = data.get('client', 'Клиент')
     if not drivers:
-        return jsonify({"success": False, "error": "Нет водителей онлайн"})
+        return jsonify({"success": False, "error": "Нет водителей"})
     count = 0
     for car, d in list(drivers.items()):
         if d.get('status') == 'free':
-            create_order_internal(car, from_addr, to_addr, price, client)
+            create_order_internal(car, from_a, to_a, price, client)
             count += 1
-    tg_send(f"📢 Заказ отправлен {count} водителям!\n📍 {from_addr} → {to_addr}\n💰 {price:,} сум")
+    tg_send(f"📢 Заказ → {count} водителям\n{from_a} → {to_a}\n💰 {price:,} сум")
     return jsonify({"success": True, "sent_to": count})
 
-
-# ✅ ИСПРАВЛЕНО - заказы из БД, не из памяти
 @app.route('/api/orders/pending', methods=['GET'])
 def get_pending_order():
     car = request.args.get('car', '')
     if not car:
         return jsonify({"has_order": False})
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute(
-            "SELECT * FROM orders WHERE car_number = %s AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-            (car,)
-        )
-        order = c.fetchone()
-        conn.close()
-        if not order:
-            return jsonify({"has_order": False})
-        return jsonify({"has_order": True, **dict(order)})
-    except Exception as e:
-        print(f"pending order error: {e}")
-        return jsonify({"has_order": False})
-
+    for order in reversed(orders_db):
+        if order['car_number'] == car and order['status'] == 'pending':
+            return jsonify({"has_order": True, **order})
+    return jsonify({"has_order": False})
 
 @app.route('/api/orders/respond', methods=['POST'])
 def respond_to_order():
-    data         = request.json
-    order_id     = data.get('order_id')
-    car          = data.get('car_number', '')
-    response_val = data.get('response', '')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("UPDATE orders SET status = %s WHERE id = %s", (response_val, order_id))
-        conn.commit()
-        conn.close()
-        if response_val == "accepted":
-            tg_send(f"✅ Водитель <b>{car}</b> принял заказ")
-        else:
-            tg_send(f"❌ Водитель <b>{car}</b> отклонил заказ")
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
+    data     = request.json
+    order_id = int(data.get('order_id', 0))
+    car      = data.get('car_number', '')
+    action   = data.get('response', '')
+    for order in orders_db:
+        if order['id'] == order_id:
+            order['status'] = action
+            break
+    if action == 'accepted':
+        tg_send(f"✅ {car} принял заказ")
+    else:
+        tg_send(f"❌ {car} отклонил заказ")
+    return jsonify({"success": True})
 
 @app.route('/api/orders/list', methods=['GET'])
 def list_orders():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT 50")
-        rows = [dict(r) for r in c.fetchall()]
-        conn.close()
-        return jsonify(rows)
-    except:
-        return jsonify([])
+    return jsonify(list(reversed(orders_db))[:50])
 
-
-# ✅ ИСПРАВЛЕНО - sender = 'driver' всегда
 @app.route('/api/chat/send', methods=['POST'])
 def chat_send():
-    data   = request.json
-    car    = data.get('car_number', '')
-    driver = data.get('driver', '')
-    text   = data.get('text', '')
-    t      = datetime.now().strftime('%H:%M')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO chat_messages (car_number, sender, text, time) VALUES (%s, %s, %s, %s)",
-            (car, 'driver', text, t)  # ✅ всегда 'driver'
-        )
-        conn.commit()
-        conn.close()
-        tg_send(f"💬 <b>{driver}</b> ({car}):\n{text}")
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
+    data = request.json
+    car  = data.get('car_number', '')
+    text = data.get('text', '')
+    drv  = data.get('driver', '')
+    t    = datetime.now().strftime('%H:%M')
+    if car not in chat_messages:
+        chat_messages[car] = []
+    chat_messages[car].append({
+        "id":         int(time.time() * 1000),
+        "car_number": car,
+        "from":       "driver",
+        "text":       text,
+        "time":       t
+    })
+    tg_send(f"💬 {drv} ({car}):\n{text}")
+    return jsonify({"success": True})
 
 @app.route('/api/chat/messages', methods=['GET'])
 def chat_get():
     car = request.args.get('car', '')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute(
-            "SELECT * FROM chat_messages WHERE car_number = %s ORDER BY id DESC LIMIT 50",
-            (car,)
-        )
-        rows = c.fetchall()
-        conn.close()
-        result = []
-        for r in reversed(rows):
-            result.append({
-                "id":         r["id"],
-                "car_number": r["car_number"],
-                "from":       r["sender"],
-                "text":       r["text"],
-                "time":       r["time"]
-            })
-        return jsonify(result)
-    except:
-        return jsonify([])
-
+    return jsonify(chat_messages.get(car, [])[-50:])
 
 @app.route('/api/chat/dispatch', methods=['POST'])
 def chat_dispatch():
@@ -1467,36 +1023,25 @@ def chat_dispatch():
     car  = data.get('car_number', '')
     text = data.get('text', '')
     t    = datetime.now().strftime('%H:%M')
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO chat_messages (car_number, sender, text, time) VALUES (%s, %s, %s, %s)",
-            (car, 'dispatcher', text, t)
-        )
-        conn.commit()
-        conn.close()
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
+    if car not in chat_messages:
+        chat_messages[car] = []
+    chat_messages[car].append({
+        "id":         int(time.time() * 1000),
+        "car_number": car,
+        "from":       "dispatcher",
+        "text":       text,
+        "time":       t
+    })
+    return jsonify({"success": True})
 
 @app.route('/ping')
 def ping():
-    drivers_db = get_driver_list_db()
-    codes      = get_pending_codes_db()
     return jsonify({
-        'status':             'alive',
-        'drivers_online':     len(drivers),
-        'drivers_registered': len(drivers_db),
-        'pending_requests':   len([p for p in codes if p['status'] == 'pending'])
+        'status':         'alive',
+        'drivers_online': len(drivers),
+        'drivers_total':  len(driver_list)
     })
 
-
 if __name__ == '__main__':
-    print("=" * 50)
-    print("🚕 TAXI 3042 XAZARASP — SERVER STARTED")
-    print("📍 Карта: /map")
-    print("🗄️  База данных: PostgreSQL")
-    print("=" * 50)
+    print("🚕 TAXI 3042 — STARTED")
     app.run(host='0.0.0.0', port=5000, debug=False)
