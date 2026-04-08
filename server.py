@@ -4,35 +4,55 @@ import random
 import time
 import threading
 import requests
-import os
 import json
+import sqlite3
 
 app = Flask(__name__)
 
-# ==================== ДАННЫЕ В ПАМЯТИ ====================
-drivers = {}
-order_counter = 1000
-chat_messages = {}
-balance_data = {}
-pending_codes = {}
-driver_list = {}
-balance_requests = []
-orders_db = []
-ratings_db = {}
-bonuses_db = {}
-revenue_db = {} # ✅ НОВОЕ: выручка по водителям
-shift_start = {} # ✅ НОВОЕ: начало смены
-tariffs_data = {
-    "base_fare": 5000,
-    "city_rate": 2800,
-    "suburb_rate": 3000,
-    "wait_rate": 500
-}
+# ==================== БАЗА ДАННЫХ ====================
+def init_db():
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS drivers (
+        car_number TEXT PRIMARY KEY,
+        name TEXT,
+        phone TEXT,
+        pin TEXT,
+        balance INTEGER DEFAULT 50000,
+        status TEXT DEFAULT 'offline'
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        car_number TEXT,
+        from_address TEXT,
+        to_address TEXT,
+        price INTEGER,
+        client TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at REAL
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS ratings (
+        car_number TEXT PRIMARY KEY,
+        total INTEGER DEFAULT 0,
+        count INTEGER DEFAULT 0,
+        orders_count INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        car_number TEXT,
+        sender TEXT,
+        text TEXT,
+        created_at REAL
+    )''')
+    conn.commit()
+    conn.close()
 
-# ==================== TELEGRAM BOT ====================
-TG_TOKEN = "8757251631:AAHMFD4cg1dU9SdZ8-7HMDxy5qDUpSc5TIs"
+init_db()
+
+# ==================== TELEGRAM ====================
+TG_TOKEN   = "8757251631:AAHMFD4cg1dU9SdZ8-7HMDxy5qDUpSc5TIs"
 TG_CHAT_ID = "1053431273"
-TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
+TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}"
 
 def tg_send(text, reply_markup=None):
     try:
@@ -43,893 +63,1691 @@ def tg_send(text, reply_markup=None):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-def tg_answer_callback(callback_id, text):
-    try:
-        requests.post(f"{TG_API}/answerCallbackQuery",
-                      data={"callback_query_id": callback_id, "text": text}, timeout=5)
-    except:
-        pass
+# ==================== БАЗА ДАННЫХ ФУНКЦИИ ====================
+def db_get_all_drivers():
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM drivers')
+    rows = c.fetchall()
+    conn.close()
+    return [{'car_number': r[0], 'name': r[1], 'phone': r[2],
+             'pin': r[3], 'balance': r[4], 'status': r[5]} for r in rows]
+
+def db_add_driver(car, name, phone, pin):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('''INSERT OR REPLACE INTO drivers
+                (car_number, name, phone, pin, balance, status)
+                VALUES (?, ?, ?, ?, 50000, "offline")''',
+                (car, name, phone, pin))
+    conn.commit()
+    conn.close()
+
+def db_delete_driver(car):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM drivers WHERE car_number=?', (car,))
+    conn.commit()
+    conn.close()
+
+def db_update_balance(car, amount):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('UPDATE drivers SET balance=? WHERE car_number=?', (amount, car))
+    conn.commit()
+    conn.close()
+
+def db_update_status(car, status):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('UPDATE drivers SET status=? WHERE car_number=?', (status, car))
+    conn.commit()
+    conn.close()
+
+def db_get_orders():
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM orders ORDER BY created_at DESC')
+    rows = c.fetchall()
+    conn.close()
+    return [{'id': r[0], 'car_number': r[1], 'from_address': r[2],
+             'to_address': r[3], 'price': r[4], 'client': r[5],
+             'status': r[6], 'created_at': r[7]} for r in rows]
+
+def db_add_order(car, from_addr, to_addr, price, client):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO orders
+                (car_number, from_address, to_address, price, client, status, created_at)
+                VALUES (?, ?, ?, ?, ?, "pending", ?)''',
+                (car, from_addr, to_addr, price, client, time.time()))
+    order_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
+
+def db_update_order_status(order_id, status):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('UPDATE orders SET status=? WHERE id=?', (status, order_id))
+    conn.commit()
+    conn.close()
+
+def db_get_rating(car):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM ratings WHERE car_number=?', (car,))
+    r = c.fetchone()
+    conn.close()
+    if not r:
+        return {'avg': 5.0, 'count': 0, 'orders': 0}
+    avg = round(r[1]/r[2], 1) if r[2] > 0 else 5.0
+    return {'avg': avg, 'count': r[2], 'orders': r[3]}
+
+def db_add_rating(car, stars):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO ratings (car_number, total, count, orders_count)
+                VALUES (?, ?, 1, 0)
+                ON CONFLICT(car_number) DO UPDATE SET
+                total=total+?, count=count+1''',
+                (car, stars, stars))
+    conn.commit()
+    conn.close()
+
+def db_get_messages(car):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM messages WHERE car_number=? ORDER BY created_at',
+              (car,))
+    rows = c.fetchall()
+    conn.close()
+    return [{'id': r[0], 'car_number': r[1], 'sender': r[2],
+             'text': r[3], 'created_at': r[4]} for r in rows]
 
-def tg_notify_new_pin(pin_id, name, car, phone, pin):
-    text = (
-        f"🔑 <b>Новая заявка на регистрацию</b>\n\n"
-        f"👤 Имя: <b>{name}</b>\n"
-        f"🚗 Авто: <b>{car}</b>\n"
-        f"📱 Тел: <b>{phone}</b>\n\n"
-        f"🔐 ПИН-код: <b>{pin}</b>"
-    )
-    markup = {"inline_keyboard": [[
-        {"text": "✅ Одобрить", "callback_data": f"approve:{pin_id}"},
-        {"text": "❌ Отказать", "callback_data": f"reject:{pin_id}"}
-    ]]}
-    tg_send(text, markup)
+def db_add_message(car, sender, text):
+    conn = sqlite3.connect('taxi.db')
+    c = conn.cursor()
+    c.execute('''INSERT INTO messages (car_number, sender, text, created_at)
+                VALUES (?, ?, ?, ?)''', (car, sender, text, time.time()))
+    conn.commit()
+    conn.close()
 
-def tg_notify_balance_request(req_id, car, amount):
-    text = (
-        f"💰 <b>Заявка на пополнение баланса</b>\n\n"
-        f"🚗 Авто: <b>{car}</b>\n"
-        f"💵 Сумма: <b>{amount:,} сум</b>"
-    )
-    markup = {"inline_keyboard": [[
-        {"text": "✅ Одобрить", "callback_data": f"bal_approve:{req_id}"},
-        {"text": "❌ Отказать", "callback_data": f"bal_reject:{req_id}"}
-    ]]}
-    tg_send(text, markup)
+# ==================== ОНЛАЙН ВОДИТЕЛИ В ПАМЯТИ ====================
+online_drivers = {}
 
-def tg_notify_approved(name, car, pin):
-    tg_send(f"✅ <b>{name}</b> ({car}) одобрен!\nПИН: <b>{pin}</b>")
+# ==================== API МАРШРУТЫ ====================
 
-def tg_notify_rejected(name, car):
-    tg_send(f"❌ Заявка <b>{name}</b> ({car}) отклонена")
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
-def get_balance(car):
-    return balance_data.get(car, 50000)
-
-def set_balance(car, amount):
-    balance_data[car] = amount
-
-def get_rating(car):
-    r = ratings_db.get(car, {"total": 0, "count": 0, "orders": 0})
-    avg = round(r["total"] / r["count"], 1) if r["count"] > 0 else 5.0
-    return {"avg": avg, "count": r["count"], "orders": r["orders"]}
-
-def add_rating(car, stars):
-    if car not in ratings_db:
-        ratings_db[car] = {"total": 0, "count": 0, "orders": 0}
-    ratings_db[car]["total"] += stars
-    ratings_db[car]["count"] += 1
-
-def get_bonus(car):
-    return bonuses_db.get(car, 0)
-
-def add_bonus(car, points):
-    bonuses_db[car] = bonuses_db.get(car, 0) + points
-
-def add_revenue(car, amount):
-    revenue_db[car] = revenue_db.get(car, 0) + amount
-
-def get_revenue(car):
-    return revenue_db.get(car, 0)
-
-def get_stars(avg):
-    if avg >= 4.8: return "⭐⭐⭐⭐⭐"
-    if avg >= 4.0: return "⭐⭐⭐⭐"
-    if avg >= 3.0: return "⭐⭐⭐"
-    if avg >= 2.0: return "⭐⭐"
-    return "⭐"
-
-def get_tariffs_db():
-    return tariffs_data
-
-def get_pending_codes_db():
-    return sorted(pending_codes.values(),
-                  key=lambda x: 0 if x['status'] == 'pending' else 1)
-
-def get_driver_list_db():
-    return list(driver_list.values())
-
-def create_order_internal(car_number, from_addr, to_addr, price, client="Админ", distance="—"):
-    global order_counter
-    order_counter += 1
-    for o in orders_db:
-        if o["car_number"] == car_number and o["status"] == "pending":
-            o["status"] = "cancelled"
-    order = {
-        "id": order_counter,
-        "order_num": order_counter,
-        "car_number": car_number,
-        "from_address": from_addr,
-        "to_address": to_addr,
-        "distance": distance,
-        "price": price,
-        "client": client,
-        "status": "pending",
-        "created_at": time.time()
-    }
-    orders_db.append(order)
-    if car_number not in ratings_db:
-        ratings_db[car_number] = {"total": 0, "count": 0, "orders": 0}
-    ratings_db[car_number]["orders"] += 1
-    return order_counter
-
-# ==================== TELEGRAM POLLING ====================
-tg_offset = 0
-
-def tg_polling():
-    global tg_offset
-    print("🤖 Telegram бот запущен")
-    while True:
-        try:
-            resp = requests.get(
-                f"{TG_API}/getUpdates",
-                params={"offset": tg_offset, "timeout": 30},
-                timeout=35
-            )
-            updates = resp.json().get("result", [])
-            for upd in updates:
-                tg_offset = upd["update_id"] + 1
-                if "callback_query" in upd:
-                    cq = upd["callback_query"]
-                    cq_id = cq["id"]
-                    data = cq.get("data", "")
-                    if data.startswith("approve:"):
-                        pin_id = data.split(":", 1)[1]
-                        info = pending_codes.get(pin_id)
-                        if info and info["status"] == "pending":
-                            info["status"] = "approved"
-                            car = info["car_number"]
-                            driver_list[car] = info
-                            set_balance(car, 50000)
-                            tg_answer_callback(cq_id, "✅ Одобрено!")
-                            tg_notify_approved(info["name"], car, info["pin"])
-                        else:
-                            tg_answer_callback(cq_id, "Заявка не найдена")
-                    elif data.startswith("reject:"):
-                        pin_id = data.split(":", 1)[1]
-                        info = pending_codes.get(pin_id)
-                        if info:
-                            info["status"] = "rejected"
-                            tg_answer_callback(cq_id, "❌ Отклонено")
-                            tg_notify_rejected(info["name"], info["car_number"])
-                    elif data.startswith("bal_approve:"):
-                        req_id = int(data.split(":", 1)[1])
-                        for req in balance_requests:
-                            if req["id"] == req_id and req["status"] == "pending":
-                                car = req["car_number"]
-                                amount = req["amount"]
-                                new_b = get_balance(car) + amount
-                                set_balance(car, new_b)
-                                if car in drivers:
-                                    drivers[car]["balance"] = new_b
-                                req["status"] = "approved"
-                                tg_answer_callback(cq_id, "✅ Баланс пополнен!")
-                                tg_send(f"✅ Баланс <b>{car}</b> пополнен!\nНовый: {new_b:,} сум")
-                                break
-                    elif data.startswith("bal_reject:"):
-                        req_id = int(data.split(":", 1)[1])
-                        for req in balance_requests:
-                            if req["id"] == req_id:
-                                req["status"] = "rejected"
-                                tg_answer_callback(cq_id, "❌ Отклонено")
-                                break
-                elif "message" in upd:
-                    msg = upd["message"]
-                    text_msg = msg.get("text", "")
-                    if text_msg == "/start":
-                        tg_send(
-                            "🚕 <b>TAXI 3042 Xazarasp</b>\n\n"
-                            "Доступные команды:\n"
-                            "/status — статус системы\n"
-                            "/drivers — водители онлайн\n"
-                            "/rating — рейтинг водителей\n"
-                            "/pending — заявки на ПИН\n"
-                            "/orders — активные заказы\n"
-                            "/revenue — выручка за смену\n"
-                            "/order НОМЕР Откуда;Куда;Цена\n\n"
-                            "Пример:\n"
-                            "<code>/order 90T785OA Bozor;Aeroport;25000</code>"
-                        )
-                    elif text_msg == "/status":
-                        online = sum(1 for d in drivers.values() if d.get("status") == "free")
-                        busy = sum(1 for d in drivers.values() if d.get("status") == "busy")
-                        pend = sum(1 for p in pending_codes.values() if p.get("status") == "pending")
-                        active = sum(1 for o in orders_db if o.get("status") == "pending")
-                        total_rev = sum(revenue_db.values())
-                        tg_send(
-                            f"📊 <b>Статус системы</b>\n\n"
-                            f"🟢 Свободны: {online}\n"
-                            f"🔴 На заказе: {busy}\n"
-                            f"📍 Сейчас онлайн: {len(drivers)}\n"
-                            f"👥 Всего водителей: {len(driver_list)}\n"
-                            f"📦 Активных заказов: {active}\n"
-                            f"⏳ Ждут ПИН: {pend}\n"
-                            f"💰 Выручка: {total_rev:,} сум"
-                        )
-                    elif text_msg == "/revenue":
-                        if not revenue_db:
-                            tg_send("💰 Нет данных о выручке")
-                        else:
-                            lines = []
-                            for car, rev in sorted(revenue_db.items(), key=lambda x: x[1], reverse=True)[:10]:
-                                lines.append(f"🚗 <b>{car}</b>: {rev:,} сум")
-                            total = sum(revenue_db.values())
-                            tg_send("💰 <b>Выручка за смену:</b>\n\n" + "\n".join(lines) + f"\n\n📊 Итого: <b>{total:,} сум</b>")
-                    elif text_msg == "/rating":
-                        if not ratings_db:
-                            tg_send("📊 Нет данных о рейтинге")
-                        else:
-                            lines = []
-                            sorted_drivers = sorted(
-                                ratings_db.items(),
-                                key=lambda x: x[1]["total"]/x[1]["count"] if x[1]["count"] > 0 else 0,
-                                reverse=True
-                            )
-                            for i, (car, r) in enumerate(sorted_drivers[:10], 1):
-                                avg = round(r["total"]/r["count"], 1) if r["count"] > 0 else 5.0
-                                bonus = get_bonus(car)
-                                lines.append(
-                                    f"{i}. <b>{car}</b>\n"
-                                    f"    {get_stars(avg)} {avg} ({r['count']} оценок)\n"
-                                    f"    📦 {r['orders']} заказов | 🎁 {bonus} бонусов"
-                                )
-                            tg_send("🏆 <b>Рейтинг водителей:</b>\n\n" + "\n\n".join(lines))
-                    elif text_msg == "/drivers":
-                        if not drivers:
-                            tg_send("Нет водителей онлайн")
-                        else:
-                            lines = []
-                            for d in drivers.values():
-                                icon = "🟢" if d.get("status") == "free" else "🔴"
-                                r = get_rating(d['car_number'])
-                                lines.append(
-                                    f"{icon} <b>{d['car_number']}</b> — {d.get('driver_name','—')}\n"
-                                    f"    ⭐ {r['avg']} | 💰 {get_balance(d['car_number']):,} сум"
-                                )
-                            tg_send("🚗 <b>Водители онлайн:</b>\n\n" + "\n".join(lines))
-                    elif text_msg == "/pending":
-                        plist = [p for p in pending_codes.values() if p.get("status") == "pending"]
-                        if not plist:
-                            tg_send("✅ Нет новых заявок")
-                        else:
-                            for p in plist:
-                                tg_send(
-                                    f"⏳ <b>Заявка</b>\n"
-                                    f"👤 {p['name']}\n"
-                                    f"🚗 {p['car_number']}\n"
-                                    f"📱 {p['phone']}\n"
-                                    f"🔐 ПИН: <b>{p['pin']}</b>"
-                                )
-                    elif text_msg == "/orders":
-                        active = [o for o in orders_db if o.get("status") == "pending"]
-                        if not active:
-                            tg_send("📦 Нет активных заказов")
-                        else:
-                            for o in active:
-                                tg_send(
-                                    f"📦 <b>Заказ #{o['order_num']}</b>\n"
-                                    f"🚗 {o['car_number']}\n"
-                                    f"📍 {o['from_address']} → {o['to_address']}\n"
-                                    f"💰 {o['price']:,} сум"
-                                )
-                    elif text_msg.startswith("/order "):
-                        try:
-                            parts = text_msg.split(" ", 2)
-                            car = parts[1].strip()
-                            info = parts[2].split(";")
-                            from_addr = info[0].strip()
-                            to_addr = info[1].strip()
-                            price = int(info[2].strip())
-                            create_order_internal(car, from_addr, to_addr, price, "Telegram")
-                            tg_send(f"✅ Заказ создан для {car}\n{from_addr} → {to_addr}\n💰 {price:,} сум")
-                        except Exception as e:
-                            tg_send(f"❌ Ошибка: {e}\nФормат: /order НОМЕР Откуда;Куда;Цена")
-        except Exception as e:
-            print(f"Polling error: {e}")
-            time.sleep(5)
-
-threading.Thread(target=tg_polling, daemon=True).start()
-
-# ==================== ГЛАВНАЯ СТРАНИЦА (SPA) ====================
-ADMIN_HTML = """<!DOCTYPE html>
-
-<html lang="ru"> <head> <meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1"> <title>TAXI 3042 — Диспетчерская</title> <style> *{margin:0;padding:0;box-sizing:border-box} :root{ --bg:#0a0a0a;--bg2:#111;--bg3:#161616;--bg4:#1c1c1c; --border:#222;--border2:#2a2a2a; --gold:#FFD600;--gold2:#e6c200; --green:#22c55e;--red:#ef4444;--blue:#3b82f6;--orange:#f97316; --text:#e5e5e5;--muted:#666;--muted2:#444; --r:10px;--r2:14px;--r3:20px; } body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px} /* scrollbar */ ::-webkit-scrollbar{width:4px;height:4px} ::-webkit-scrollbar-track{background:var(--bg)} ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
-/* ── ШАПКА ── */
-.topbar{
-position:sticky;top:0;z-index:200;
-display:flex;align-items:center;gap:12px;
-background:rgba(10,10,10,.95);border-bottom:1px solid var(--border);
-padding:0 20px;height:54px;backdrop-filter:blur(10px)
-}
-.logo{color:var(--gold);font-size:18px;font-weight:700;white-space:nowrap}
-.logo span{color:var(--text);font-weight:400;font-size:13px;margin-left:6px}
-.topbar-spacer{flex:1}
-.pill{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600}
-.pill-live{background:#0a1f0a;color:var(--green);border:1px solid #1a3a1a}
-.pill-tg{background:#001f3d;color:#60a5fa;border:1px solid #1a3a5a}
-.pill-time{background:var(--bg2);color:var(--gold);border:1px solid var(--border);font-family:monospace;letter-spacing:.05em}
-.dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(1.3)}}
-
-/* ── ТАБЫ ── */
-.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);background:var(--bg);padding:0 20px;overflow-x:auto}
-.tab{padding:12px 18px;font-size:13px;font-weight:500;color:var(--muted);border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:all .2s}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--gold);border-bottom-color:var(--gold)}
-.tab-badge{background:var(--red);color:#fff;padding:1px 5px;border-radius:8px;font-size:10px;margin-left:4px}
-
-/* ── КОНТЕНТ ── */
-.page{display:none;padding:20px;max-width:1300px;margin:0 auto}
-.page.active{display:block}
-
-/* ── СТАТЫ ── */
-.stats-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
-.stat{
-flex:1;min-width:110px;background:var(--bg2);border:1px solid var(--border);
-border-radius:var(--r2);padding:16px;cursor:default;transition:border-color .2s
-}
-.stat:hover{border-color:var(--border2)}
-.stat-val{font-size:28px;font-weight:700;color:var(--gold);line-height:1}
-.stat-val.green{color:var(--green)}
-.stat-val.red{color:var(--red)}
-.stat-val.blue{color:var(--blue)}
-.stat-val.orange{color:var(--orange)}
-.stat-lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-top:6px}
-
-/* ── КАРТОЧКИ/ТАБЛИЦЫ ── */
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r2);margin-bottom:16px;overflow:hidden}
-.card-head{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg3)}
-.card-head h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--gold);flex:1}
-.card-body{padding:16px}
-
-table{width:100%;border-collapse:collapse}
-th{background:var(--bg3);padding:9px 12px;text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;font-weight:500;white-space:nowrap}
-td{padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
-tr:last-child td{border-bottom:none}
-tr:hover td{background:rgba(255,255,255,.02)}
-
-/* ── КНОПКИ ── */
-.btn{display:inline-flex;align-items:center;gap:4px;padding:5px 11px;border:none;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s;white-space:nowrap}
-.btn:hover{opacity:.85;transform:translateY(-1px)}
-.btn:active{transform:translateY(0)}
-.btn-primary{background:var(--gold);color:#000}
-.btn-success{background:#14532d;color:var(--green);border:1px solid #166534}
-.btn-danger{background:#2a0000;color:var(--red);border:1px solid #4a0000}
-.btn-info{background:#0c1a3a;color:var(--blue);border:1px solid #1e3a6a}
-.btn-orange{background:#1f1000;color:var(--orange);border:1px solid #3d2000}
-.btn-ghost{background:var(--bg3);color:var(--muted);border:1px solid var(--border)}
-
-.btn-lg{padding:9px 20px;font-size:14px;border-radius:var(--r)}
-.btn-send{padding:9px 24px;background:var(--gold);color:#000;border:none;border-radius:var(--r);font-size:14px;font-weight:700;cursor:pointer;transition:all .2s}
-.btn-send:hover{background:var(--gold2)}
-.btn-send:disabled{background:var(--border2);color:var(--muted);cursor:not-allowed;transform:none}
-
-/* ── ФОРМА ЗАКАЗА ── */
-.order-form{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r2);padding:20px;margin-bottom:16px}
-.form-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
-.form-group{display:flex;flex-direction:column;gap:5px}
-.form-group label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-.form-control{
-background:var(--bg);color:var(--text);border:1px solid var(--border2);
-padding:8px 12px;border-radius:var(--r);font-size:13px;outline:none;transition:border-color .2s
-}
-.form-control:focus{border-color:var(--gold)}
-.form-control::placeholder{color:var(--muted2)}
-select.form-control option{background:var(--bg2)}
-
-.quick-addr{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.addr-chip{padding:4px 11px;background:var(--bg3);color:var(--muted);border:1px solid var(--border2);border-radius:20px;font-size:12px;cursor:pointer;transition:all .18s}
-.addr-chip:hover{background:var(--gold);color:#000;border-color:var(--gold)}
-
-.order-toast{display:none;margin-top:12px;padding:10px 16px;border-radius:var(--r);font-size:13px;font-weight:600}
-.order-toast.ok{background:#0a2a0a;color:var(--green);border-left:3px solid var(--green)}
-.order-toast.err{background:#2a0a0a;color:var(--red);border-left:3px solid var(--red)}
-
-/* ── СТАТУС ПИЛЮЛИ ── */
-.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600}
-.badge-free{background:#0a2a0a;color:var(--green);border:1px solid #166534}
-.badge-busy{background:#2a0a0a;color:var(--red);border:1px solid #7f1d1d}
-.badge-pending{background:#2a1a00;color:var(--orange);border:1px solid #7c2d12}
-.badge-ok{background:#0a2a0a;color:var(--green)}
-.badge-rejected{background:#2a0a0a;color:var(--red)}
-.car-num{color:var(--gold);font-weight:700;font-family:monospace;font-size:13px}
-.pin-code{color:var(--gold);font-weight:700;font-family:monospace;font-size:18px;letter-spacing:.15em}
-
-/* ── ЧАТ ── */
-.chat-wrap{display:flex;flex-direction:column;height:400px}
-.chat-messages{flex:1;overflow-y:auto;padding:12px;background:var(--bg);border-radius:var(--r);margin-bottom:10px;display:flex;flex-direction:column;gap:6px}
-.chat-msg{padding:8px 12px;border-radius:10px;max-width:70%;font-size:13px;line-height:1.4}
-.chat-msg.own{background:var(--gold);color:#000;align-self:flex-end;border-bottom-right-radius:3px}
-.chat-msg.other{background:var(--bg4);color:var(--text);align-self:flex-start;border-bottom-left-radius:3px}
-.chat-msg .msg-meta{font-size:10px;opacity:.6;margin-top:3px}
-.chat-input-row{display:flex;gap:8px}
-.chat-input-row input{flex:1}
-.quick-replies{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
-.qr-btn{padding:5px 11px;background:var(--bg3);color:var(--muted);border:1px solid var(--border2);border-radius:20px;font-size:11px;cursor:pointer;transition:all .18s}
-.qr-btn:hover{background:var(--gold);color:#000;border-color:var(--gold)}
-
-/* ── РЕЙТИНГ ── */
-.driver-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r2);padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;gap:14px;transition:border-color .2s}
-.driver-card:hover{border-color:var(--border2)}
-.rank-num{font-size:22px;font-weight:700;color:var(--muted2);min-width:30px;text-align:center}
-.rank-num.gold{color:#FFD600}
-.rank-num.silver{color:#a8a8a8}
-.rank-num.bronze{color:#cd7f32}
-.dc-info{flex:1}
-.dc-car{color:var(--gold);font-weight:700;font-size:15px;font-family:monospace}
-.dc-sub{color:var(--muted);font-size:12px;margin-top:2px}
-.dc-rating{text-align:right;min-width:60px}
-.dc-avg{font-size:22px;font-weight:700;color:var(--gold)}
-.rating-bar{background:var(--bg3);border-radius:3px;height:5px;width:120px;margin-top:5px;overflow:hidden}
-.rating-fill{background:var(--gold);height:100%;border-radius:3px;transition:width .4s}
-.bonus-pill{display:inline-flex;align-items:center;gap:3px;background:#1a1100;color:var(--gold);border:1px solid #3d2800;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600}
-
-/* ── ТАРИФЫ ── */
-.tariff-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-.tariff-card{flex:1;min-width:120px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--r2);padding:16px;text-align:center}
-.tariff-val{font-size:24px;font-weight:700;color:var(--gold)}
-.tariff-lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-top:4px}
-
-/* ── ВЫРУЧКА ── */
-.rev-bar-wrap{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.rev-bar-bg{flex:1;background:var(--bg3);border-radius:3px;height:8px;overflow:hidden}
-.rev-bar-fill{height:100%;background:linear-gradient(90deg,var(--gold2),var(--gold));border-radius:3px;transition:width .5s}
-
-/* ── МОДАЛ ── */
-.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:500;align-items:center;justify-content:center;padding:20px}
-.modal-bg.open{display:flex}
-.modal{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r3);padding:24px;width:100%;max-width:440px;position:relative}
-.modal h3{color:var(--gold);font-size:17px;margin-bottom:16px}
-.modal-close{position:absolute;top:14px;right:16px;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;line-height:1;padding:2px 6px;border-radius:5px;transition:background .15s}
-.modal-close:hover{background:var(--bg4)}
-.info-row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);font-size:13px}
-.info-row:last-child{border:none}
-.info-lbl{color:var(--muted)}
-.info-val{font-weight:600}
-.modal-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
-.modal-actions .btn{flex:1;justify-content:center}
-
-/* ── УВЕДОМЛЕНИЯ ── */
-.notifications{position:fixed;top:64px;right:16px;z-index:1000;display:flex;flex-direction:column;gap:8px;pointer-events:none}
-.notif{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r);padding:12px 16px;font-size:13px;max-width:300px;pointer-events:all;animation:slideIn .3s ease;box-shadow:0 4px 24px rgba(0,0,0,.5)}
-.notif.notif-success{border-left:3px solid var(--green)}
-.notif.notif-warning{border-left:3px solid var(--orange)}
-.notif.notif-info{border-left:3px solid var(--blue)}
-@keyframes slideIn{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
-@keyframes slideOut{from{transform:translateX(0);opacity:1}to{transform:translateX(120%);opacity:0}}
-.notif.removing{animation:slideOut .3s ease forwards}
-
-/* ── НЕТ ДАННЫХ ── */
-.empty{text-align:center;padding:40px 20px;color:var(--muted2)}
-.empty-icon{font-size:36px;margin-bottom:10px}
-
-/* ── АДАПТИВ ── */
-@media(max-width:600px){
-.topbar{padding:0 12px}
-.page{padding:12px}
-.form-row{flex-direction:column}
-.stats-row .stat{min-width:calc(50% - 6px)}
-.btn-lg{width:100%;justify-content:center}
-}
-</style>
-
-</head> <body><!-- ШАПКА --><div class="topbar"> <div class="logo">🚕 TAXI 3042 <span>XAZARASP</span></div> <div class="topbar-spacer"></div> <div class="pill pill-time" id="clock">00:00:00</div> <div class="pill pill-live"><span class="dot"></span>Live</div> <div class="pill pill-tg">🤖 TG</div> </div><!-- ТАБЫ --><div class="tabs"> <button class="tab active" onclick="switchTab('dash')">📊 Дашборд</button> <button class="tab" onclick="switchTab('order')">📦 Заказы <span class="tab-badge" id="badge-orders" style="display:none"></span></button> <button class="tab" onclick="switchTab('drivers')">🚗 Водители</button> <button class="tab" onclick="switchTab('rating')">🏆 Рейтинг</button> <button class="tab" onclick="switchTab('chat')">💬 Чат</button> <button class="tab" onclick="switchTab('finance')">💰 Финансы</button> <button class="tab" onclick="switchTab('settings')">⚙️ Настройки</button> </div><!-- УВЕДОМЛЕНИЯ --><div class="notifications" id="notifBox"></div><!-- ═══════════════════════════════ ДАШБОРД ═══════════════════════════════ --><div class="page active" id="page-dash"> <div class="stats-row"> <div class="stat"><div class="stat-val" id="s-online">0</div><div class="stat-lbl">На линии</div></div> <div class="stat"><div class="stat-val green" id="s-free">0</div><div class="stat-lbl">Свободны</div></div> <div class="stat"><div class="stat-val red" id="s-busy">0</div><div class="stat-lbl">На заказе</div></div> <div class="stat"><div class="stat-val orange" id="s-pending">0</div><div class="stat-lbl">Ждут ПИН</div></div> <div class="stat"><div class="stat-val" id="s-total">0</div><div class="stat-lbl">Всего водит.</div></div> <div class="stat"><div class="stat-val blue" id="s-orders">0</div><div class="stat-lbl">Активн. заказов</div></div> <div class="stat"><div class="stat-val green" id="s-revenue">0</div><div class="stat-lbl">Выручка (сум)</div></div> </div> <!-- Быстрые действия --> <div class="card"> <div class="card-head"><h3>⚡ Быстрые действия</h3></div> <div class="card-body" style="display:flex;gap:8px;flex-wrap:wrap"> <button class="btn btn-primary btn-lg" onclick="switchTab('order')">📦 Новый заказ</button> <button class="btn btn-info btn-lg" onclick="switchTab('chat')">💬 Открыть чат</button> <button class="btn btn-ghost btn-lg" onclick="window.open('/map')">🗺 Карта</button> <button class="btn btn-ghost btn-lg" onclick="exportReport()">📥 Экспорт отчёта</button> <button class="btn btn-danger btn-lg" onclick="resetRevenue()">🔄 Сбросить смену</button> </div> </div> <!-- Водители онлайн (компактно) --> <div class="card"> <div class="card-head"> <h3>🚗 Водители онлайн</h3> <span id="last-upd" style="color:var(--muted2);font-size:11px"></span> </div> <div style="overflow-x:auto"> <table id="tbl-drivers"> <thead> <tr> <th>Авто</th><th>Водитель</th><th>Статус</th> <th>Скорость</th><th>Баланс</th><th>Рейтинг</th><th>Действия</th> </tr> </thead> <tbody id="tbody-drivers"> <tr><td colspan="7" class="empty"><div class="empty-icon">🚗</div>Водители выйдут на линию</td></tr> </tbody> </table> </div> </div> <!-- Активные заказы --> <div class="card" id="card-active-orders" style="display:none"> <div class="card-head"><h3>📦 Активные заказы</h3></div> <div style="overflow-x:auto"> <table> <thead><tr><th>#</th><th>Водитель</th><th>Откуда</th><th>Куда</th><th>Цена</th><th>Клиент</th><th>Статус</th><th>Время</th></tr></thead> <tbody id="tbody-active-orders"></tbody> </table> </div> </div> </div><!-- ═══════════════════════════════ ЗАКАЗЫ ═══════════════════════════════ --><div class="page" id="page-order"> <div class="order-form"> <div class="form-row"> <div class="form-group"> <label>Водитель</label> <select class="form-control" id="o-car" style="width:220px"> <option value="">— Выбрать —</option> <option value="ALL">📢 Всем свободным</option> </select> </div> <div class="form-group"> <label>Откуда</label> <input class="form-control" id="o-from" placeholder="Адрес подачи" style="width:180px"> </div> <div class="form-group"> <label>Куда</label> <input class="form-control" id="o-to" placeholder="Адрес назначения" style="width:180px"> </div> <div class="form-group"> <label>Цена (сум)</label> <input class="form-control" id="o-price" type="number" placeholder="0" style="width:130px" min="0" step="500"> </div> <div class="form-group"> <label>Клиент</label> <input class="form-control" id="o-client" placeholder="Имя/телефон" style="width:150px"> </div> <div class="form-group"> <label>&nbsp;</label> <button class="btn-send" id="btn-send-order" onclick="createOrder()">🚀 Отправить</button> </div> </div> <div class="quick-addr"> <span style="color:var(--muted2);font-size:11px;text-transform:uppercase;letter-spacing:.06em">Быстро:</span> <button class="addr-chip" onclick="setAddr('Bozor')">📍 Bozor</button> <button class="addr-chip" onclick="setAddr('Aeroport')">✈️ Aeroport</button> <button class="addr-chip" onclick="setAddr('Kasalxona')">🏥 Kasalxona</button> <button class="addr-chip" onclick="setAddr('Vokzal')">🚉 Vokzal</button> <button class="addr-chip" onclick="setAddr('Maktab')">🏫 Maktab</button> <button class="addr-chip" onclick="setAddr('Markaziy bozor')">🛒 Markaziy</button> <button class="addr-chip" onclick="setAddr('Poliklinika')">💊 Poliklinika</button> <button class="addr-chip" onclick="setAddr('Do\'kon')">🏪 Do\'kon</button> </div> <div class="order-toast" id="o-toast"></div> </div> <!-- История заказов --> <div class="card"> <div class="card-head"><h3>📋 История заказов</h3><button class="btn btn-ghost" onclick="loadOrders()">↻ Обновить</button></div> <div style="overflow-x:auto"> <table> <thead><tr><th>#</th><th>Водитель</th><th>Откуда → Куда</th><th>Цена</th><th>Клиент</th><th>Статус</th><th>Время</th></tr></thead> <tbody id="tbody-orders"></tbody> </table> </div> </div> </div><!-- ═══════════════════════════════ ВОДИТЕЛИ ═══════════════════════════════ --><div class="page" id="page-drivers"> <!-- Заявки на ПИН --> <div class="card" id="card-pins"> <div class="card-head"> <h3>🔑 Заявки на регистрацию</h3> <span id="pin-count" style="background:var(--orange);color:#000;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700"></span> </div> <div style="overflow-x:auto"> <table> <thead><tr><th>Имя</th><th>Телефон</th><th>Авто</th><th>ПИН</th><th>Статус</th><th>Действия</th></tr></thead> <tbody id="tbody-pins"></tbody> </table> </div> </div> <!-- Заявки на баланс --> <div class="card" id="card-bal-reqs"> <div class="card-head"><h3>💳 Заявки на пополнение</h3></div> <div style="overflow-x:auto"> <table> <thead><tr><th>Авто</th><th>Сумма</th><th>Статус</th><th>Действия</th></tr></thead> <tbody id="tbody-bal-reqs"></tbody> </table> </div> </div> <!-- Все зарегистрированные --> <div class="card"> <div class="card-head"><h3>📋 Все водители</h3></div> <div style="overflow-x:auto"> <table> <thead><tr><th>Имя</th><th>Телефон</th><th>Авто</th><th>ПИН</th><th>Баланс</th><th>Рейтинг</th><th>Выручка</th><th>Действия</th></tr></thead> <tbody id="tbody-all-drivers"></tbody> </table> </div> </div> </div><!-- ═══════════════════════════════ РЕЙТИНГ ═══════════════════════════════ --><div class="page" id="page-rating"> <div id="rating-list"></div> </div><!-- ═══════════════════════════════ ЧАТ ═══════════════════════════════ --><div class="page" id="page-chat"> <div style="display:flex;gap:16px;flex-wrap:wrap"> <div style="flex:0 0 220px"> <div class="card"> <div class="card-head"><h3>Водители</h3></div> <div id="chat-driver-list" style="padding:8px"></div> </div> </div> <div style="flex:1;min-width:280px"> <div class="card" id="chat-area" style="display:none"> <div class="card-head"> <h3 id="chat-title">Чат</h3> <button class="btn btn-ghost" onclick="closeChat()">✕ Закрыть</button> </div> <div class="card-body" style="padding:12px"> <div class="chat-wrap"> <div class="chat-messages" id="chat-msgs"></div> <div class="chat-input-row"> <input class="form-control" id="chat-text" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendChat()"> <button class="btn btn-primary" onclick="sendChat()">📤</button> </div> <div class="quick-replies"> <button class="qr-btn" onclick="sendQuick('✅ Принято')">Принято</button> <button class="qr-btn" onclick="sendQuick('⏳ Подождите')">Подождите</button> <button class="qr-btn" onclick="sendQuick('📦 Есть заказ!')">Есть заказ</button> <button class="qr-btn" onclick="sendQuick('🟢 Вы свободны')">Свободны</button> <button class="qr-btn" onclick="sendQuick('🚦 Выезжайте на линию!')">На линию</button> <button class="qr-btn" onclick="sendQuick('⚠️ Клиент ждёт!')">Клиент ждёт</button> <button class="qr-btn" onclick="sendQuick('👍 Хорошей смены!')">Хорошей смены</button> </div> </div> </div> </div> <div class="card" id="chat-empty-state"> <div class="card-body empty"><div class="empty-icon">💬</div>Выберите водителя слева</div> </div> </div> </div> </div><!-- ═══════════════════════════════ ФИНАНСЫ ═══════════════════════════════ --><div class="page" id="page-finance"> <div class="stats-row"> <div class="stat"><div class="stat-val green" id="f-total">0</div><div class="stat-lbl">Итого выручка</div></div> <div class="stat"><div class="stat-val" id="f-orders">0</div><div class="stat-lbl">Завершено заказов</div></div> <div class="stat"><div class="stat-val blue" id="f-avg">0</div><div class="stat-lbl">Средний чек</div></div> </div> <div class="card"> <div class="card-head"><h3>💰 Выручка по водителям</h3><button class="btn btn-ghost" onclick="loadFinance()">↻</button></div> <div class="card-body" id="rev-list"></div> </div> </div><!-- ═══════════════════════════════ НАСТРОЙКИ ═══════════════════════════════ --><div class="page" id="page-settings"> <div class="card"> <div class="card-head"><h3>💰 Тарифы</h3></div> <div class="card-body"> <div class="tariff-grid" id="tariff-display"></div> <div class="form-row"> <div class="form-group"> <label>Посадка (сум)</label> <input class="form-control" id="t-base" type="number" style="width:130px"> </div> <div class="form-group"> <label>Город (сум/км)</label> <input class="form-control" id="t-city" type="number" style="width:130px"> </div> <div class="form-group"> <label>Загород (сум/км)</label> <input class="form-control" id="t-suburb" type="number" style="width:130px"> </div> <div class="form-group"> <label>Ожидание (сум/мин)</label> <input class="form-control" id="t-wait" type="number" style="width:130px"> </div> <div class="form-group"> <label>&nbsp;</label> <button class="btn-send" onclick="saveTariffs()">💾 Сохранить</button> </div> </div> </div> </div> <div class="card"> <div class="card-head"><h3>🔔 Уведомления</h3></div> <div class="card-body" style="display:flex;flex-direction:column;gap:12px"> <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px"> <input type="checkbox" id="notif-sound" checked> Звуковые уведомления о новых заказах </label> <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px"> <input type="checkbox" id="notif-new-driver" checked> Уведомления о новых водителях онлайн </label> </div> </div> </div><!-- МОДАЛ ИНФОРМАЦИЯ О ВОДИТЕЛЕ --><div class="modal-bg" id="driver-modal"> <div class="modal"> <button class="modal-close" onclick="closeModal()">✕</button> <h3>🚗 <span id="m-car"></span></h3> <div class="info-row"><span class="info-lbl">Водитель</span><span class="info-val" id="m-name"></span></div> <div class="info-row"><span class="info-lbl">Телефон</span><span class="info-val" id="m-phone"></span></div> <div class="info-row"><span class="info-lbl">Статус</span><span class="info-val" id="m-status"></span></div> <div class="info-row"><span class="info-lbl">Баланс</span><span class="info-val" id="m-balance"></span></div> <div class="info-row"><span class="info-lbl">Скорость</span><span class="info-val" id="m-speed"></span></div> <div class="info-row"><span class="info-lbl">Рейтинг</span><span class="info-val" id="m-rating"></span></div> <div class="info-row"><span class="info-lbl">Бонусы</span><span class="info-val" id="m-bonus"></span></div> <div class="info-row"><span class="info-lbl">Выручка сегодня</span><span class="info-val" id="m-revenue"></span></div> <div class="modal-actions"> <button class="btn btn-info" onclick="closeModal();openChat(modalCar)">💬 Чат</button> <button class="btn btn-success" onclick="closeModal();doAddBalance(modalCar)">💰 Баланс</button> <button class="btn btn-orange" onclick="closeModal();doAddBonus(modalCar)">🎁 Бонус</button> <button class="btn btn-primary" onclick="closeModal();quickOrder(modalCar)">📦 Заказ</button> <button class="btn btn-danger" onclick="closeModal();doRemove(modalCar)">🗑 Убрать</button> </div> </div> </div><script> // ═══════════════ СОСТОЯНИЕ ═══════════════ let state = { drivers: {}, ratings: {}, bonuses: {}, revenue: {}, orders: [], pins: [], balReqs: [], allDrivers: [], tariffs: {}, pendingCount: 0, activeOrders: 0, }; let currentCar = ''; let modalCar = ''; let chatInterval = null; let chatSeenIds = new Set(); let prevDriverSet = new Set(); let prevActiveOrders = 0; // ═══════════════ ЧАСЫ ═══════════════ (function clock(){ const el = document.getElementById('clock'); function tick(){ const d=new Date(); el.textContent=[d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,'0')).join(':'); } tick(); setInterval(tick,1000); })(); // ═══════════════ УВЕДОМЛЕНИЯ ═══════════════ function notify(msg, type='info'){ const box = document.getElementById('notifBox'); const el = document.createElement('div'); el.className = `notif notif-${type}`; el.innerHTML = msg; el.onclick = () => el.remove(); box.appendChild(el); setTimeout(()=>{ el.classList.add('removing'); setTimeout(()=>el.remove(),300); },4000); } function beep(){ if(!document.getElementById('notif-sound')?.checked) return; try{ const ctx=new(window.AudioContext||window.webkitAudioContext)(); const o=ctx.createOscillator(); const g=ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value=880; o.type='sine'; g.gain.setValueAtTime(.3,ctx.currentTime); g.gain.exponentialRampToValueAtTime(.001,ctx.currentTime+.4); o.start(ctx.currentTime); o.stop(ctx.currentTime+.4); }catch(e){} } // ═══════════════ ТАБЫ ═══════════════ function switchTab(id){ document.querySelectorAll('.tab').forEach((t,i)=>t.classList.remove('active')); document.querySelectorAll('.page').forEach(p=>p.classList.remove('active')); const pages=['dash','order','drivers','rating','chat','finance','settings']; const idx=pages.indexOf(id); if(idx>=0) document.querySelectorAll('.tab')[idx].classList.add('active'); document.getElementById('page-'+id)?.classList.add('active'); if(id==='order') loadOrderHistory(); if(id==='drivers') loadDriversPage(); if(id==='rating') loadRating(); if(id==='chat') loadChatDriverList(); if(id==='finance') loadFinance(); if(id==='settings') loadTariffs(); } // ═══════════════ LIVE ОБНОВЛЕНИЕ ═══════════════ async function liveUpdate(){ try{ const [drvRes, orderRes] = await Promise.all([ fetch('/api/drivers').then(r=>r.json()), fetch('/api/orders/list').then(r=>r.json()), ]); state.drivers = drvRes; state.orders = orderRes; const keys = Object.keys(drvRes); const free = keys.filter(k=>drvRes[k].status==='free').length; const busy = keys.filter(k=>drvRes[k].status==='busy').length; const activeOrds = orderRes.filter(o=>o.status==='pending'||o.status==='accepted').length; // Уведомления о новых водителях const newSet = new Set(keys); if(document.getElementById('notif-new-driver')?.checked){ for(const k of newSet){ if(!prevDriverSet.has(k)){ notify(`🟢 <b>${drvRes[k].car_number||k}</b> вышел на линию`, 'info'); } } } prevDriverSet = newSet; // Уведомления о новых заказах if(activeOrds > prevActiveOrders && prevActiveOrders > 0){ beep(); notify(`📦 Новый заказ! Активных: ${activeOrds}`, 'warning'); } prevActiveOrders = activeOrds; // Обновляем статы document.getElementById('s-online').textContent = keys.length; document.getElementById('s-free').textContent = free; document.getElementById('s-busy').textContent = busy; document.getElementById('s-orders').textContent = activeOrds; // Заказы статбейдж const badge = document.getElementById('badge-orders'); badge.style.display = activeOrds ? '' : 'none'; badge.textContent = activeOrds; document.getElementById('last-upd').textContent = 'Обновлено: ' + new Date().toLocaleTimeString(); renderDriversTable(); renderActiveOrders(); updateDriverSelect(); }catch(e){} // Отдельно — считаем ожидающие ПИН и баланс try{ const pins = await fetch('/api/admin/pending_codes').then(r=>r.json()); state.pins = pins; const pCount = pins.filter(p=>p.status==='pending').length; state.pendingCount = pCount; document.getElementById('s-pending').textContent = pCount; }catch(e){} // Выручка try{ const rev = await fetch('/api/stats/revenue').then(r=>r.json()); state.revenue = rev; const total = Object.values(rev).reduce((a,b)=>a+b,0); document.getElementById('s-revenue').textContent = fmt(total); }catch(e){} // Рейтинги try{ state.ratings = await fetch('/api/stats/ratings').then(r=>r.json()); state.bonuses = await fetch('/api/stats/bonuses').then(r=>r.json()); state.allDrivers = await fetch('/api/stats/all_drivers').then(r=>r.json()); document.getElementById('s-total').textContent = state.allDrivers.length; }catch(e){} } setInterval(liveUpdate, 15000); liveUpdate(); // ═══════════════ ФОРМАТИРОВАНИЕ ═══════════════ function fmt(n){ return Number(n||0).toLocaleString('ru') } function ts(t){ return t ? new Date(t*1000).toLocaleTimeString('ru',{hour:'2-digit',minute:'2-digit'}) : '—' } // ═══════════════ ТАБЛИЦА ВОДИТЕЛЕЙ (ДАШБОРД) ═══════════════ function renderDriversTable(){ const tbody = document.getElementById('tbody-drivers'); const keys = Object.keys(state.drivers); if(!keys.length){ tbody.innerHTML = `<tr><td colspan="7" class="empty"><div class="empty-icon">🚗</div>Водители выйдут на линию</td></tr>`; return; } tbody.innerHTML = keys.map(k=>{ const d = state.drivers[k]; const r = state.ratings[d.car_number] || {avg:5.0, count:0}; const statusBadge = d.status==='free' ? `<span class="badge badge-free">🟢 Свободен</span>` : `<span class="badge badge-busy">🔴 На заказе</span>`; return `<tr> <td><span class="car-num">${d.car_number||k}</span></td> <td>${d.driver_name||'—'}<br><small style="color:var(--muted)">${d.phone||''}</small></td> <td>${statusBadge}</td> <td>${d.speed||0} км/ч</td> <td style="color:var(--green);font-weight:600">${fmt(d.balance)} сум</td> <td>⭐ ${r.avg} <small style="color:var(--muted)">(${r.count})</small></td> <td style="white-space:nowrap"> <button class="btn btn-primary" onclick="quickOrder('${escQ(d.car_number||k)}')">📦</button> <button class="btn btn-info" onclick="openChat('${escQ(d.car_number||k)}')">💬</button> <button class="btn btn-success" onclick="doAddBalance('${escQ(d.car_number||k)}')">💰</button> <button class="btn btn-orange" onclick="doAddBonus('${escQ(d.car_number||k)}')">🎁</button> <button class="btn btn-ghost" onclick="showModal('${escQ(d.car_number||k)}','${escQ(d.driver_name||'')}','${escQ(d.phone||'')}','${d.status||''}',${d.balance||0},${d.speed||0},${r.avg||5},${state.bonuses[d.car_number]||0},${state.revenue[d.car_number]||0})">ℹ️</button> <button class="btn btn-danger" onclick="doRemove('${escQ(d.car_number||k)}')">🗑</button> </td> </tr>`; }).join(''); } function renderActiveOrders(){ const active = state.orders.filter(o=>o.status==='pending'||o.status==='accepted'); const card = document.getElementById('card-active-orders'); card.style.display = active.length ? '' : 'none'; const tbody = document.getElementById('tbody-active-orders'); tbody.innerHTML = active.map(o=>{ const st = o.status==='pending' ? `<span class="badge badge-pending">⏳ Ожидает</span>` : `<span class="badge badge-ok">✅ Принят</span>`; const age = Math.floor((Date.now()/1000 - o.created_at)/60); return `<tr> <td style="color:var(--muted2)">${o.order_num}</td> <td><span class="car-num">${o.car_number}</span></td> <td>${esc(o.from_address)}</td> <td>${esc(o.to_address)}</td> <td style="color:var(--green);font-weight:600">${fmt(o.price)} сум</td> <td>${esc(o.client)}</td> <td>${st}</td> <td style="color:var(--muted)">${age}мин назад</td> </tr>`; }).join(''); } // ═══════════════ ВЫБОР ВОДИТЕЛЯ В ФОРМЕ ═══════════════ function updateDriverSelect(){ const sel = document.getElementById('o-car'); const cur = sel.value; const opts = ['<option value="">— Выбрать —</option><option value="ALL">📢 Всем свободным</option>']; Object.values(state.drivers).forEach(d=>{ const icon = d.status==='free' ? '🟢' : '🔴'; opts.push(`<option value="${escAttr(d.car_number)}">${icon} ${esc(d.car_number)} — ${esc(d.driver_name||'—')}</option>`); }); sel.innerHTML = opts.join(''); sel.value = cur; } // ═══════════════ СОЗДАНИЕ ЗАКАЗА ═══════════════ function setAddr(addr){ const f = document.getElementById('o-from'); const t = document.getElementById('o-to'); if(!f.value) f.value = addr; else if(!t.value) t.value = addr; else { f.value = addr; t.value = ''; } } function quickOrder(car){ switchTab('order'); setTimeout(()=>{ document.getElementById('o-car').value = car; document.getElementById('o-from').focus(); },100); } function showOrderToast(msg, ok){ const el = document.getElementById('o-toast'); el.textContent = msg; el.className = 'order-toast ' + (ok ? 'ok' : 'err'); el.style.display = 'block'; setTimeout(()=>el.style.display='none', 5000); } async function createOrder(){ const car = document.getElementById('o-car').value; const from = document.getElementById('o-from').value.trim(); const to = document.getElementById('o-to').value.trim(); const price = parseInt(document.getElementById('o-price').value)||0; const client = document.getElementById('o-client').value.trim()||'Клиент'; if(!car) return showOrderToast('❌ Выберите водителя!', false); if(!from) return showOrderToast('❌ Введите откуда!', false); if(!to) return showOrderToast('❌ Введите куда!', false); if(price<=0)return showOrderToast('❌ Укажите корректную цену!', false); const btn = document.getElementById('btn-send-order'); btn.disabled = true; btn.textContent = '⏳...'; try{ const url = car==='ALL' ? '/api/orders/broadcast' : '/api/orders/create'; const res = await fetch(url,{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({car_number:car,from_address:from,to_address:to,price,client}) }).then(r=>r.json()); if(res.success){ showOrderToast('✅ Заказ отправлен!' + (res.sent_to ? ` (${res.sent_to} водителям)` : ''), true); document.getElementById('o-from').value=''; document.getElementById('o-to').value=''; document.getElementById('o-price').value=''; document.getElementById('o-client').value=''; loadOrderHistory(); } else { showOrderToast('❌ ' + (res.error||'Ошибка'), false); } }catch(e){ showOrderToast('❌ Нет соединения', false); } finally{ btn.disabled=false; btn.textContent='🚀 Отправить'; } } // ═══════════════ ИСТОРИЯ ЗАКАЗОВ ═══════════════ async function loadOrderHistory(){ try{ const orders = await fetch('/api/orders/list').then(r=>r.json()); const tbody = document.getElementById('tbody-orders'); if(!orders.length){ tbody.innerHTML = `<tr><td colspan="7" class="empty">Нет заказов</td></tr>`; return; } tbody.innerHTML = orders.slice(0,50).map(o=>{ const st = {pending:'<span class="badge badge-pending">⏳</span>', accepted:'<span class="badge badge-ok">✅</span>', cancelled:'<span class="badge badge-rejected">❌</span>', rejected:'<span class="badge badge-rejected">🚫</span>'}[o.status]||o.status; return `<tr> <td style="color:var(--muted2)">${o.order_num}</td> <td><span class="car-num">${o.car_number}</span></td> <td>${esc(o.from_address)} → ${esc(o.to_address)}</td> <td style="color:var(--green);font-weight:600">${fmt(o.price)} сум</td> <td>${esc(o.client)}</td> <td>${st}</td> <td style="color:var(--muted)">${ts(o.created_at)}</td> </tr>`; }).join(''); }catch(e){} } function loadOrders(){ loadOrderHistory(); } // ═══════════════ СТРАНИЦА ВОДИТЕЛЕЙ ═══════════════ async function loadDriversPage(){ // ПИН заявки const pins = state.pins; const pendPins = pins.filter(p=>p.status==='pending'); document.getElementById('pin-count').textContent = pendPins.length ? `${pendPins.length} новых` : ''; document.getElementById('card-pins').style.display = pins.length ? '' : 'none'; document.getElementById('tbody-pins').innerHTML = pins.map(p=>{ const st = {pending:`<span class="badge badge-pending">⏳ Ожидает</span>`, approved:`<span class="badge badge-ok">✅ Одобрен</span>`, rejected:`<span class="badge badge-rejected">❌</span>`}[p.status]||p.status; const actions = p.status==='pending' ? ` <button class="btn btn-success" onclick="approvePin('${escQ(p.pin_id)}')">✅ Одобрить</button> <button class="btn btn-danger" onclick="rejectPin('${escQ(p.pin_id)}')">❌ Отказ</button> ` : '—'; return `<tr> <td>${esc(p.name)}</td> <td>${esc(p.phone)}</td> <td><span class="car-num">${esc(p.car_number)}</span></td> <td><span class="pin-code">${p.pin}</span></td> <td>${st}</td> <td>${actions}</td> </tr>`; }).join('') || `<tr><td colspan="6" class="empty">Нет заявок</td></tr>`; // Заявки на баланс try{ const bReqs = await fetch('/api/admin/balance_requests').then(r=>r.json()); state.balReqs = bReqs; document.getElementById('card-bal-reqs').style.display = bReqs.length ? '' : 'none'; document.getElementById('tbody-bal-reqs').innerHTML = bReqs.map(r=>{ const st = {pending:`<span class="badge badge-pending">⏳</span>`, approved:`<span class="badge badge-ok">✅</span>`, rejected:`<span class="badge badge-rejected">❌</span>`}[r.status]||r.status; const acts = r.status==='pending' ? ` <button class="btn btn-success" onclick="approveBalance(${r.id})">✅</button> <button class="btn btn-danger" onclick="rejectBalance(${r.id})">❌</button> ` : '—'; return `<tr> <td><span class="car-num">${esc(r.car_number)}</span></td> <td style="color:var(--green);font-weight:600">${fmt(r.amount)} сум</td> <td>${st}</td> <td>${acts}</td> </tr>`; }).join('') || `<tr><td colspan="4" class="empty">Нет заявок</td></tr>`; }catch(e){} // Все водители const all = state.allDrivers; document.getElementById('tbody-all-drivers').innerHTML = all.map(d=>{ const r = state.ratings[d.car_number]||{avg:5.0,count:0}; const rev = state.revenue[d.car_number]||0; return `<tr> <td>${esc(d.name)}</td> <td>${esc(d.phone)}</td> <td><span class="car-num">${esc(d.car_number)}</span></td> <td><span class="pin-code" style="font-size:14px">${d.pin}</span></td> <td style="color:var(--green);font-weight:600">${fmt(d.balance)} сум</td> <td>⭐ ${r.avg} <small style="color:var(--muted)">(${r.count})</small></td> <td style="color:var(--orange);font-weight:600">${fmt(rev)} сум</td> <td> <button class="btn btn-success" onclick="doAddBalance('${escQ(d.car_number)}')">💰</button> <button class="btn btn-orange" onclick="doAddBonus('${escQ(d.car_number)}')">🎁</button> <button class="btn btn-danger" onclick="deleteDriver('${escQ(d.car_number)}')">🗑</button> </td> </tr>`; }).join('') || `<tr><td colspan="8" class="empty">Нет водителей</td></tr>`; } // ═══════════════ РЕЙТИНГ ═══════════════ function loadRating(){ const container = document.getElementById('rating-list'); const ratings = state.ratings; const sorted = Object.entries(ratings).sort((a,b)=>{ const ra = a[1].count > 0 ? a[1].total/a[1].count : 0; const rb = b[1].count > 0 ? b[1].total/b[1].count : 0; return rb-ra; }); if(!sorted.length){ container.innerHTML = `<div class="empty"><div class="empty-icon">🏆</div>Нет данных о рейтинге</div>`; return; } container.innerHTML = sorted.map(([car,r],i)=>{ const avg = r.count > 0 ? (r.total/r.count).toFixed(1) : '5.0'; const stars = avg>=4.8?'⭐⭐⭐⭐⭐':avg>=4?'⭐⭐⭐⭐':avg>=3?'⭐⭐⭐':'⭐⭐'; const bonus = state.bonuses[car]||0; const rev = state.revenue[car]||0; const rank = i===0?'gold':i===1?'silver':i===2?'bronze':''; return `<div class="driver-card"> <div class="rank-num ${rank}">${i+1}</div> <div class="dc-info"> <div class="dc-car">🚗 ${esc(car)}</div> <div class="dc-sub">📦 ${r.orders||0} заказов &nbsp;|&nbsp; <span class="bonus-pill">🎁 ${bonus} бонусов</span> &nbsp;|&nbsp; 💰 ${fmt(rev)} сум</div> <div class="rating-bar"><div class="rating-fill" style="width:${Math.round(avg/5*100)}%"></div></div> </div> <div class="dc-rating"> <div class="dc-avg">${avg}</div> <div>${stars}</div> <div style="color:var(--muted);font-size:11px">${r.count} оценок</div> </div> <div style="display:flex;flex-direction:column;gap:5px"> <button class="btn btn-orange" onclick="doAddBonus('${escQ(car)}')">🎁 Бонус</button> <button class="btn btn-info" onclick="openChat('${escQ(car)}')">💬 Чат</button> </div> </div>`; }).join(''); } // ═══════════════ ЧАТ ═══════════════ function loadChatDriverList(){ const container = document.getElementById('chat-driver-list'); const keys = Object.keys(state.drivers); if(!keys.length){ container.innerHTML = `<div class="empty" style="padding:20px">Нет водителей</div>`; return; } container.innerHTML = keys.map(k=>{ const d = state.drivers[k]; const icon = d.status==='free' ? '🟢' : '🔴'; const active = d.car_number === currentCar ? 'background:var(--bg4);' : ''; return `<div onclick="openChat('${escQ(d.car_number||k)}')" style="padding:9px 10px;border-radius:var(--r);cursor:pointer;${active}transition:background .15s;display:flex;align-items:center;gap:8px" onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='${active?'var(--bg4)':'transparent'}'"> <span>${icon}</span> <div> <div style="font-size:13px;font-weight:600;color:var(--gold)">${esc(d.car_number||k)}</div> <div style="font-size:11px;color:var(--muted)">${esc(d.driver_name||'—')}</div> </div> </div>`; }).join(''); } function openChat(car){ currentCar = car; switchTab('chat'); document.getElementById('chat-area').style.display = ''; document.getElementById('chat-empty-state').style.display = 'none'; document.getElementById('chat-title').textContent = '💬 ' + car; document.getElementById('chat-msgs').innerHTML = ''; chatSeenIds.clear(); loadChat(); if(chatInterval) clearInterval(chatInterval); chatInterval = setInterval(loadChat, 2000); loadChatDriverList(); } function closeChat(){ currentCar = ''; document.getElementById('chat-area').style.display = 'none'; document.getElementById('chat-empty-state').style.display = ''; if(chatInterval){ clearInterval(chatInterval); chatInterval=null; } } async function loadChat(){ if(!currentCar) return; try{ const msgs = await fetch('/api/chat/messages?car='+encodeURIComponent(currentCar)).then(r=>r.json()); const box = document.getElementById('chat-msgs'); let added = false; msgs.forEach(m=>{ if(chatSeenIds.has(m.id)) return; chatSeenIds.add(m.id); const div = document.createElement('div'); div.className = 'chat-msg ' + (m.from==='dispatcher'?'own':'other'); const who = m.from==='dispatcher' ? '👨‍💼 Диспетчер' : ('🚗 ' + (m.car_number||'')); div.innerHTML = `<b>${esc(who)}</b>: ${esc(m.text)}<div class="msg-meta">${m.time||''}</div>`; box.appendChild(div); added = true; }); if(added) box.scrollTop = box.scrollHeight; }catch(e){} } async function sendChat(){ const text = document.getElementById('chat-text').value.trim(); if(!text || !currentCar) return; document.getElementById('chat-text').value = ''; try{ await fetch('/api/chat/dispatch',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({car_number:currentCar, text}) }); loadChat(); }catch(e){} } function sendQuick(text){ if(!currentCar){ notify('❌ Сначала выберите водителя в чате!','warning'); return; } fetch('/api/chat/dispatch',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({car_number:currentCar, text}) }).then(()=>loadChat()); } // ═══════════════ ФИНАНСЫ ═══════════════ async function loadFinance(){ const rev = state.revenue; const orders = state.orders; const done = orders.filter(o=>o.status==='accepted'); const total = Object.values(rev).reduce((a,b)=>a+b,0); const avg = done.length ? Math.round(done.reduce((a,o)=>a+o.price,0)/done.length) : 0; document.getElementById('f-total').textContent = fmt(total); document.getElementById('f-orders').textContent = done.length; document.getElementById('f-avg').textContent = fmt(avg); const maxRev = Math.max(1, ...Object.values(rev)); const sorted = Object.entries(rev).sort((a,b)=>b[1]-a[1]); document.getElementById('rev-list').innerHTML = sorted.map(([car, amount])=>` <div class="rev-bar-wrap"> <span class="car-num" style="min-width:110px">${esc(car)}</span> <div class="rev-bar-bg"> <div class="rev-bar-fill" style="width:${Math.round(amount/maxRev*100)}%"></div> </div> <span style="min-width:100px;text-align:right;color:var(--green);font-weight:600">${fmt(amount)} сум</span> </div> `).join('') || `<div class="empty">Нет данных о выручке</div>`; } async function resetRevenue(){ if(!confirm('Сбросить выручку и начать новую смену?')) return; try{ await fetch('/api/stats/reset_revenue',{method:'POST'}); state.revenue = {}; notify('✅ Смена сброшена!','info'); loadFinance(); }catch(e){} } function exportReport(){ const rev = state.revenue; const ratings = state.ratings; const total = Object.values(rev).reduce((a,b)=>a+b,0); const date = new Date().toLocaleDateString('ru'); let csv = `Отчёт TAXI 3042 XAZARASP - ${date}\n\n`; csv += `Водитель,Выручка (сум),Рейтинг,Заказов,Бонусы\n`; const cars = new Set([...Object.keys(rev), ...Object.keys(ratings)]); for(const car of cars){ const r = ratings[car]||{avg:5,count:0,orders:0}; csv += `${car},${rev[car]||0},${r.avg},${r.orders||0},${state.bonuses[car]||0}\n`; } csv += `\nИтого,${total},,, \n`; const blob = new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `taxi3042_${date.replace(/\./g,'-')}.csv`; a.click(); notify('📥 Отчёт скачан!', 'info'); } // ═══════════════ ТАРИФЫ ═══════════════ async function loadTariffs(){ try{ const t = await fetch('/api/tariffs').then(r=>r.json()); state.tariffs = t; document.getElementById('tariff-display').innerHTML = ` <div class="tariff-card"><div class="tariff-val">${fmt(t.base_fare)}</div><div class="tariff-lbl">Посадка (сум)</div></div> <div class="tariff-card"><div class="tariff-val">${fmt(t.city_rate)}</div><div class="tariff-lbl">Город (сум/км)</div></div> <div class="tariff-card"><div class="tariff-val">${fmt(t.suburb_rate)}</div><div class="tariff-lbl">Загород (сум/км)</div></div> <div class="tariff-card"><div class="tariff-val">${fmt(t.wait_rate)}</div><div class="tariff-lbl">Ожидание (сум/мин)</div></div> `; document.getElementById('t-base').value = t.base_fare; document.getElementById('t-city').value = t.city_rate; document.getElementById('t-suburb').value = t.suburb_rate; document.getElementById('t-wait').value = t.wait_rate; }catch(e){} } async function saveTariffs(){ const body = { base_fare: parseInt(document.getElementById('t-base').value)||5000, city_rate: parseInt(document.getElementById('t-city').value)||2800, suburb_rate: parseInt(document.getElementById('t-suburb').value)||3000, wait_rate: parseInt(document.getElementById('t-wait').value)||500, }; try{ await fetch('/api/tariffs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); notify('✅ Тарифы сохранены!','info'); loadTariffs(); }catch(e){ notify('❌ Ошибка сохранения','warning'); } } // ═══════════════ МОДАЛЬНОЕ ОКНО ═══════════════ function showModal(car,name,phone,status,balance,speed,rating,bonus,revenue){ modalCar = car; document.getElementById('m-car').textContent = car; document.getElementById('m-name').textContent = name||'—'; document.getElementById('m-phone').textContent = phone||'—'; document.getElementById('m-status').textContent = status==='free'?'🟢 Свободен':status==='busy'?'🔴 На заказе':'⚫ '+status; document.getElementById('m-balance').textContent = fmt(balance)+' сум'; document.getElementById('m-speed').textContent = speed+' км/ч'; document.getElementById('m-rating').textContent = '⭐ '+rating+'/5.0'; document.getElementById('m-bonus').textContent = '🎁 '+bonus+' бонусов'; document.getElementById('m-revenue').textContent = fmt(revenue)+' сум'; document.getElementById('driver-modal').classList.add('open'); } function closeModal(){ document.getElementById('driver-modal').classList.remove('open'); } document.getElementById('driver-modal').addEventListener('click',function(e){if(e.target===this)closeModal();}); // ═══════════════ ПИН ДЕЙСТВИЯ ═══════════════ async function approvePin(pinId){ if(!confirm('Одобрить заявку?')) return; try{ const r = await fetch('/api/admin/approve_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin_id:pinId})}).then(r=>r.json()); notify(r.success ? '✅ Водитель одобрен!' : '❌ Ошибка', r.success?'info':'warning'); await liveUpdate(); loadDriversPage(); }catch(e){} } async function rejectPin(pinId){ if(!confirm('Отклонить заявку?')) return; try{ await fetch('/api/admin/reject_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin_id:pinId})}); notify('❌ Заявка отклонена','info'); await liveUpdate(); loadDriversPage(); }catch(e){} } // ═══════════════ БАЛАНС ═══════════════ async function doAddBalance(car){ const amount = prompt(`💰 Пополнение баланса для ${car}\n(введите сумму в сум):`); if(!amount || isNaN(amount) || parseInt(amount)<=0) return; try{ const r = await fetch('/api/admin/add_balance',{ method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({car_number:car, amount:parseInt(amount)}) }).then(r=>r.json()); if(r.success){ notify(`✅ Баланс ${car} пополнен! Новый: ${fmt(r.new_balance)} сум`, 'info'); liveUpdate(); } }catch(e){} } async function approveBalance(id){ if(!confirm('Одобрить пополнение баланса?')) return; try{ await fetch('/api/admin/approve_balance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); notify('✅ Баланс пополнен!','info'); liveUpdate(); loadDriversPage(); }catch(e){} } async function rejectBalance(id){ if(!confirm('Отклонить заявку?')) return; try{ await fetch('/api/admin/reject_balance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); notify('❌ Заявка отклонена','info'); loadDriversPage(); }catch(e){} } // ═══════════════ БОНУСЫ ═══════════════ async function doAddBonus(car){ const opts = ['10 — За пунктуальность','20 — За хорошие отзывы','50 — За лучший месяц','100 — За год работы']; const pts = [10,20,50,100]; const choice = prompt(`🎁 Бонусы для ${car}:\n\n${opts.map((o,i)=>`${i+1}. ${o}`).join('\n')}\n\nВведите номер (1-4) или своё количество:`); if(!choice) return; const idx = parseInt(choice)-1; const amount = (idx>=0&&idx<4) ? pts[idx] : parseInt(choice); if(!amount||amount<=0||isNaN(amount)) return; try{ const r = await fetch('/api/admin/add_bonus',{ method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({car_number:car, points:amount}) }).then(r=>r.json()); if(r.success){ notify(`🎁 ${car}: +${amount} бонусов (всего ${r.total_bonus})`, 'info'); liveUpdate(); } }catch(e){} } // ═══════════════ УДАЛЕНИЕ ═══════════════ async function doRemove(car){ if(!confirm(`Убрать ${car} с линии?`)) return; try{ await fetch('/remove_driver',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({driver:car,car_number:car})}); notify(`🗑 ${car} убран с линии`, 'info'); liveUpdate(); }catch(e){} } async function deleteDriver(car){ if(!confirm(`Полностью удалить ${car}? Все данные будут удалены!`)) return; try{ await fetch('/api/admin/delete_driver',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({car_number:car})}); notify(`🗑 ${car} удалён`, 'info'); liveUpdate(); loadDriversPage(); }catch(e){} } // ═══════════════ УТИЛИТЫ ═══════════════ function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') } function escAttr(s){ return String(s||'').replace(/"/g,'&quot;') } function escQ(s){ return String(s||'').replace(/'/g,"\\'") } </script></body> </html>"""
-
-# ==================== РОУТЫ ====================
-@app.route('/')
-def index():
-    return ADMIN_HTML
-
-@app.route('/api/stats/revenue', methods=['GET'])
-def get_revenue_api():
-    return jsonify(revenue_db)
-
-@app.route('/api/stats/ratings', methods=['GET'])
-def get_ratings_api():
-    result = {}
-    for car, r in ratings_db.items():
-        avg = round(r["total"]/r["count"], 1) if r["count"] > 0 else 5.0
-        result[car] = {"avg": avg, "count": r["count"], "orders": r["orders"],
-                       "total": r["total"], "stars": get_stars(avg)}
-    return jsonify(result)
-
-@app.route('/api/stats/bonuses', methods=['GET'])
-def get_bonuses_api():
-    return jsonify(bonuses_db)
-
-@app.route('/api/stats/all_drivers', methods=['GET'])
-def get_all_drivers_api():
-    result = []
-    for car, d in driver_list.items():
-        result.append({
-            "name": d.get("name",""),
-            "phone": d.get("phone",""),
-            "car_number": d.get("car_number", car),
-            "pin": d.get("pin",""),
-            "balance": get_balance(car)
-        })
-    return jsonify(result)
-
-@app.route('/api/stats/reset_revenue', methods=['POST'])
-def reset_revenue():
-    revenue_db.clear()
-    tg_send("🔄 Смена сброшена — выручка обнулена")
-    return jsonify({"success": True})
-
-@app.route('/api/admin/balance_requests', methods=['GET'])
-def get_balance_requests():
-    return jsonify(sorted(balance_requests, key=lambda x: x['id'], reverse=True)[:30])
-
-@app.route('/map')
-def map_page():
-    api_key = "AIzaSyDbbgIqjyOqzS7gozVqmZ_V4G1T6cpKXC0"
-    return f"""<!DOCTYPE html>
-
-<html> <head> <meta charset="utf-8"> <title>Карта — TAXI 3042</title> <style> *{{margin:0;padding:0;}} #map{{width:100vw;height:100vh;}} #info{{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.85); color:#FFD600;padding:10px 16px;border-radius:10px;font-size:13px; z-index:100;border:1px solid #333;}} </style> </head> <body> <div id="map"></div> <div id="info">🚗 Онлайн: <b id="cnt">0</b></div> <script> let map,markers={{}},iws={{}},first=true; function initMap(){{ map=new google.maps.Map(document.getElementById('map'),{{ center:{{lat:41.3069,lng:61.0838}},zoom:13, styles:[ {{elementType:'geometry',stylers:[{{color:'#1a1a2e'}}]}}, {{elementType:'labels.text.fill',stylers:[{{color:'#8ec3b9'}}]}}, {{featureType:'road',elementType:'geometry',stylers:[{{color:'#304a7d'}}]}}, {{featureType:'water',elementType:'geometry',stylers:[{{color:'#0e1626'}}]}} ] }}); update();setInterval(update,3000); }} function update(){{ fetch('/api/drivers').then(r=>r.json()).then(data=>{{ document.getElementById('cnt').textContent=Object.keys(data).length; let bounds=new google.maps.LatLngBounds(),has=false; Object.keys(markers).forEach(k=>{{ if(!data[k]){{markers[k].setMap(null);delete markers[k]; if(iws[k]){{iws[k].close();delete iws[k];}}}} }}); for(let k in data){{ let d=data[k],lat=parseFloat(d.lat),lng=parseFloat(d.lng); if(isNaN(lat)||isNaN(lng))continue; let pos={{lat,lng}};bounds.extend(pos);has=true; let icon={{url:d.status==='free' ?'https://maps.google.com/mapfiles/ms/icons/green-dot.png' :'https://maps.google.com/mapfiles/ms/icons/red-dot.png', scaledSize:new google.maps.Size(40,40)}}; if(markers[k]){{markers[k].setPosition(pos);markers[k].setIcon(icon);}} else{{ markers[k]=new google.maps.Marker({{position:pos,map,title:d.car_number,icon, label:{{text:d.car_number,color:'#FFD600',fontSize:'11px',fontWeight:'bold'}}}}); markers[k].addListener('click',()=>{{ Object.values(iws).forEach(w=>w.close()); iws[k]=new google.maps.InfoWindow({{content:` <div style="background:#1a1a1a;color:#fff;padding:14px;border-radius:10px;min-width:200px;"> <b style="color:#FFD600;font-size:15px;">🚗 ${{d.car_number}}</b><br><br> 👤 ${{d.driver_name||'—'}}<br>📱 ${{d.phone||'—'}}<br> 📍 <b style="color:${{d.status==='free'?'#4CAF50':'#FF5252'}}"> ${{d.status==='free'?'🟢 Свободен':'🔴 На заказе'}}</b><br> ⚡ ${{d.speed}} км/ч<br> 💰 ${{parseInt(d.balance||0).toLocaleString()}} сум<br> <small style="color:#555;">🕐 ${{d.time_str}}</small> </div>`}}); iws[k].open(map,markers[k]); }}); }} }} if(has&&first){{first=false;map.fitBounds(bounds); if(Object.keys(data).length===1)map.setZoom(15);}} }}); }} </script> <script async defer src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initMap"></script> </body></html>"""
-@app.route('/api/driver/register', methods=['POST'])
-def register_driver():
-    data = request.json
-    phone = data.get('phone', '')
-    car = data.get('car_number', '')
-    name = data.get('name', 'Водитель')
-    pin = str(random.randint(1000, 9999))
-    pin_id = f"pin_{int(time.time())}_{random.randint(100,999)}"
-    pending_codes[pin_id] = {
-        "pin_id": pin_id, "name": name, "phone": phone,
-        "car_number": car, "pin": pin,
-        "status": "pending", "created_at": time.time()
-    }
-    tg_notify_new_pin(pin_id, name, car, phone, pin)
-    return jsonify({"success": True})
-
-@app.route('/api/driver/login', methods=['POST'])
-def driver_login():
-    data = request.json
-    pin = data.get('pin', '')
-    for car, d in driver_list.items():
-        if d.get('pin') == pin:
-            return jsonify({"success": True, "driver_id": car,
-                            "name": d.get('name',''), "balance": get_balance(car)})
-    for pid, info in pending_codes.items():
-        if info.get('pin') == pin and info.get('status') == 'pending':
-            info['status'] = 'approved'
-            car = info['car_number']
-            driver_list[car] = info
-            set_balance(car, 50000)
-            tg_notify_approved(info['name'], car, pin)
-            return jsonify({"success": True, "driver_id": car,
-                            "name": info.get('name',''), "balance": 50000})
-    return jsonify({"success": False, "error": "Неверный ПИН"}), 401
-
-@app.route('/api/admin/pending_codes', methods=['GET'])
-def get_pending_codes_route():
-    return jsonify(get_pending_codes_db())
-
-@app.route('/api/admin/pending_by_car', methods=['GET'])
-def pending_by_car():
-    result = {}
-    for info in pending_codes.values():
-        if info.get('status') == 'pending':
-            result[info['car_number']] = info['pin']
-    return jsonify(result)
-
-@app.route('/api/admin/approve_code', methods=['POST'])
-def approve_code():
-    pin_id = request.json.get('pin_id','')
-    info = pending_codes.get(pin_id)
-    if not info:
-        return jsonify({"success": False, "error": "Not found"})
-    info['status'] = 'approved'
-    car = info['car_number']
-    driver_list[car] = info
-    set_balance(car, 50000)
-    tg_notify_approved(info['name'], car, info['pin'])
-    return jsonify({"success": True})
-
-@app.route('/api/admin/reject_code', methods=['POST'])
-def reject_code():
-    pin_id = request.json.get('pin_id','')
-    info = pending_codes.get(pin_id)
-    if info:
-        info['status'] = 'rejected'
-        tg_notify_rejected(info['name'], info['car_number'])
-    return jsonify({"success": True})
-
-@app.route('/api/admin/delete_driver', methods=['POST'])
-def delete_driver():
-    car = request.json.get('car_number','')
-    driver_list.pop(car, None)
-    drivers.pop(car, None)
-    ratings_db.pop(car, None)
-    bonuses_db.pop(car, None)
-    revenue_db.pop(car, None)
-    tg_send(f"🗑 Водитель {car} удалён")
-    return jsonify({"success": True})
-
-@app.route('/api/admin/add_balance', methods=['POST'])
-def admin_add_balance():
-    car = request.json.get('car_number','')
-    amount = int(request.json.get('amount', 0))
-    if amount <= 0:
-        return jsonify({"success": False})
-    new_b = get_balance(car) + amount
-    set_balance(car, new_b)
-    if car in drivers:
-        drivers[car]['balance'] = new_b
-    tg_send(f"💰 {car}: +{amount:,} → {new_b:,} сум")
-    return jsonify({"success": True, "new_balance": new_b})
-
-@app.route('/api/admin/add_bonus', methods=['POST'])
-def admin_add_bonus():
-    car = request.json.get('car_number','')
-    points = int(request.json.get('points', 0))
-    if points <= 0:
-        return jsonify({"success": False})
-    add_bonus(car, points)
-    total = get_bonus(car)
-    tg_send(f"🎁 {car}: +{points} бонусов → всего {total}")
-    return jsonify({"success": True, "total_bonus": total})
-
-@app.route('/api/driver/rate', methods=['POST'])
-def rate_driver():
-    car = request.json.get('car_number','')
-    stars = int(request.json.get('stars', 5))
-    stars = max(1, min(5, stars))
-    add_rating(car, stars)
-    r = get_rating(car)
-    if stars == 5:
-        add_bonus(car, 5)
-    return jsonify({"success": True, "new_rating": r["avg"]})
-
-@app.route('/api/driver/<driver_id>/rating', methods=['GET'])
-def get_driver_rating(driver_id):
-    r = get_rating(driver_id)
-    return jsonify({
-        "rating": r["avg"],
-        "count": r["count"],
-        "orders": r["orders"],
-        "bonus": get_bonus(driver_id),
-        "stars": get_stars(r["avg"])
-    })
-
-@app.route('/api/balance/request', methods=['POST'])
-def request_balance():
-    car = request.json.get('car_number','')
-    amount = int(request.json.get('amount', 0))
-    if amount <= 0:
-        return jsonify({"success": False})
-    req_id = len(balance_requests) + 1
-    balance_requests.append({
-        "id": req_id, "car_number": car,
-        "amount": amount, "status": "pending", "created_at": time.time()
-    })
-    tg_notify_balance_request(req_id, car, amount)
-    return jsonify({"success": True})
-
-@app.route('/api/admin/approve_balance', methods=['POST'])
-def approve_balance():
-    req_id = int(request.json.get('id', 0))
-    for req in balance_requests:
-        if req['id'] == req_id and req['status'] == 'pending':
-            car = req['car_number']
-            new_b = get_balance(car) + req['amount']
-            set_balance(car, new_b)
-            if car in drivers:
-                drivers[car]['balance'] = new_b
-            req['status'] = 'approved'
-            bonus_pts = req['amount'] // 10000
-            if bonus_pts > 0:
-                add_bonus(car, bonus_pts)
-            tg_send(f"✅ {car}: +{req['amount']:,} → {new_b:,} сум\n🎁 +{bonus_pts} бонусов")
-            break
-    return jsonify({"success": True})
-
-@app.route('/api/admin/reject_balance', methods=['POST'])
-def reject_balance():
-    req_id = int(request.json.get('id', 0))
-    for req in balance_requests:
-        if req['id'] == req_id:
-            req['status'] = 'rejected'
-            break
-    return jsonify({"success": True})
-
-@app.route('/api/driver/<driver_id>/balance', methods=['GET'])
-def get_driver_balance(driver_id):
-    return jsonify({
-        "balance": get_balance(driver_id),
-        "bonus": get_bonus(driver_id),
-        "rating": get_rating(driver_id)["avg"]
-    })
-
-@app.route('/api/tariffs', methods=['GET'])
-def get_tariffs():
-    return jsonify(get_tariffs_db())
-
-@app.route('/api/tariffs', methods=['POST'])
-def update_tariffs():
-    data = request.get_json(force=True)
-    tariffs_data.update({
-        "base_fare": int(data.get('base_fare', 5000)),
-        "city_rate": int(data.get('city_rate', 2800)),
-        "suburb_rate": int(data.get('suburb_rate', 3000)),
-        "wait_rate": int(data.get('wait_rate', 500))
-    })
-    tg_send(f"💰 Тарифы обновлены")
-    return jsonify({'status': 'ok'})
-
-@app.route('/location', methods=['POST'])
-def location():
-    data = request.get_json(force=True)
-    did = data.get('driver', data.get('car_number', 'unknown'))
-    bal = get_balance(did)
-    if did not in shift_start:
-        shift_start[did] = time.time()
-    drivers[did] = {
-        'lat': data.get('lat', 0),
-        'lng': data.get('lng', 0),
-        'speed': data.get('speed', 0),
-        'status': data.get('status', 'free'),
-        'car_number': data.get('car_number', did),
-        'balance': bal,
-        'phone': data.get('phone', ''),
-        'driver_name': data.get('driver_name', ''),
-        'time_str': datetime.now().strftime('%H:%M:%S'),
-        'timestamp': time.time()
-    }
-    return jsonify({
-        'status': 'ok',
-        'balance': bal,
-        'bonus': get_bonus(did),
-        'rating': get_rating(did)["avg"]
-    })
-
+# --- Водители ---
 @app.route('/api/drivers', methods=['GET'])
 def get_drivers():
-    return jsonify(drivers)
+    drivers = db_get_all_drivers()
+    for d in drivers:
+        if d['car_number'] in online_drivers:
+            d['status'] = online_drivers[d['car_number']].get('status', 'free')
+            d['speed'] = online_drivers[d['car_number']].get('speed', 0)
+            d['lat'] = online_drivers[d['car_number']].get('lat', 0)
+            d['lon'] = online_drivers[d['car_number']].get('lon', 0)
+        else:
+            d['status'] = 'offline'
+            d['speed'] = 0
+    rating = db_get_rating(d['car_number'])
+    d['rating'] = rating['avg']
+    return jsonify({'ok': True, 'drivers': drivers})
 
-@app.route('/remove_driver', methods=['POST'])
-def remove_driver():
-    data = request.get_json(force=True)
-    did = data.get('driver', data.get('car_number',''))
-    drivers.pop(did, None)
-    return jsonify({'status': 'ok'})
+@app.route('/api/drivers/add', methods=['POST'])
+def add_driver():
+    data  = request.json
+    car   = data.get('car_number', '').strip().upper()
+    name  = data.get('name', '').strip()
+    phone = data.get('phone', '').strip()
+    if not car or not name or not phone:
+        return jsonify({'ok': False, 'error': 'Заполните все поля!'})
+    pin = str(random.randint(1000, 9999))
+    db_add_driver(car, name, phone, pin)
+    tg_send(f"✅ Новый водитель добавлен!\n🚗 {car}\n👤 {name}\n📱 {phone}\n🔐 ПИН: {pin}")
+    return jsonify({'ok': True, 'pin': pin,
+                    'message': f'Водитель добавлен! ПИН: {pin}'})
 
-@app.route('/api/balance', methods=['POST'])
+@app.route('/api/drivers/delete', methods=['POST'])
+def delete_driver():
+    data = request.json
+    car  = data.get('car_number', '').strip().upper()
+    if not car:
+        return jsonify({'ok': False, 'error': 'Укажите номер авто!'})
+    db_delete_driver(car)
+    online_drivers.pop(car, None)
+    return jsonify({'ok': True, 'message': f'Водитель {car} удалён!'})
+
+@app.route('/api/drivers/balance', methods=['POST'])
 def update_balance():
-    data = request.get_json(force=True)
-    did = data.get('driver','')
-    amount = int(data.get('amount', 0))
-    new_b = get_balance(did) + amount
-    set_balance(did, new_b)
-    if did in drivers:
-        drivers[did]['balance'] = new_b
-    return jsonify({'status': 'ok', 'new_balance': new_b})
+    data   = request.json
+    car    = data.get('car_number', '').strip().upper()
+    amount = data.get('amount', 0)
+    if not car:
+        return jsonify({'ok': False, 'error': 'Укажите номер авто!'})
+    db_update_balance(car, amount)
+    return jsonify({'ok': True, 'message': f'Баланс обновлён!'})
 
-@app.route('/admin/block_driver', methods=['POST'])
-def block_driver():
-    car = request.get_json(force=True).get('car_number','')
-    if car in drivers:
-        drivers[car]['status'] = 'blocked'
-        tg_send(f"🚫 {car} заблокирован")
-    return jsonify({'status': 'ok'})
+# --- Онлайн статус ---
+@app.route('/api/driver/ping', methods=['POST'])
+def driver_ping():
+    data = request.json
+    car  = data.get('car_number', '').strip().upper()
+    if not car:
+        return jsonify({'ok': False})
+    online_drivers[car] = {
+        'car_number': car,
+        'status': data.get('status', 'free'),
+        'speed': data.get('speed', 0),
+        'lat': data.get('lat', 0),
+        'lon': data.get('lon', 0),
+        'last_ping': time.time()
+    }
+    db_update_status(car, data.get('status', 'free'))
+    orders = db_get_orders()
+    pending = [o for o in orders
+               if o['car_number'] == car and o['status'] == 'pending']
+    return jsonify({'ok': True, 'orders': pending})
+
+# --- Заказы ---
+@app.route('/api/orders', methods=['GET'])
+def get_orders():
+    orders = db_get_orders()
+    return jsonify({'ok': True, 'orders': orders})
 
 @app.route('/api/orders/create', methods=['POST'])
 def create_order():
-    data = request.json
-    car = data.get('car_number','')
-    from_a = data.get('from_address','')
-    to_a = data.get('to_address','')
-    price = int(data.get('price', 0))
-    client = data.get('client','Клиент')
-    distance = data.get('distance','—')
-    order_id = create_order_internal(car, from_a, to_a, price, client, distance)
-    tg_send(f"📦 Заказ → <b>{car}</b>\n📍 {from_a} → {to_a}\n💰 {price:,} сум\n👤 {client}")
-    return jsonify({"success": True, "order_id": order_id})
+    data  = request.json
+    car   = data.get('car_number', '').strip().upper()
+    frm   = data.get('from_address', '').strip()
+    to    = data.get('to_address', '').strip()
+    price = data.get('price', 0)
+    client = data.get('client', 'Клиент').strip()
+    if not car or not frm or not to or not price:
+        return jsonify({'ok': False, 'error': 'Заполните все поля!'})
+    order_id = db_add_order(car, frm, to, price, client)
+    tg_send(
+        f"📦 <b>Новый заказ #{order_id}</b>\n"
+        f"🚗 {car}\n"
+        f"📍 {frm} → {to}\n"
+        f"💰 {price:,} сум\n"
+        f"👤 {client}"
+    )
+    return jsonify({'ok': True, 'order_id': order_id,
+                    'message': f'Заказ #{order_id} создан!'})
 
 @app.route('/api/orders/broadcast', methods=['POST'])
 def broadcast_order():
-    data = request.json
-    from_a = data.get('from_address','')
-    to_a = data.get('to_address','')
-    price = int(data.get('price', 0))
-    client = data.get('client','Клиент')
-    if not drivers:
-        return jsonify({"success": False, "error": "Нет водителей онлайн"})
+    data   = request.json
+    frm    = data.get('from_address', '').strip()
+    to     = data.get('to_address', '').strip()
+    price  = data.get('price', 0)
+    client = data.get('client', 'Клиент').strip()
+    drivers = db_get_all_drivers()
     count = 0
-    for car, d in list(drivers.items()):
-        if d.get('status') == 'free':
-            create_order_internal(car, from_a, to_a, price, client)
+    for d in drivers:
+        if d['car_number'] in online_drivers:
+            db_add_order(d['car_number'], frm, to, price, client)
             count += 1
-    if count == 0:
-        return jsonify({"success": False, "error": "Нет свободных водителей"})
-    tg_send(f"📢 Заказ → {count} водителям\n📍 {from_a} → {to_a}\n💰 {price:,} сум")
-    return jsonify({"success": True, "sent_to": count})
+    tg_send(
+        f"📢 <b>Рассылка заказа</b>\n"
+        f"📍 {frm} → {to}\n"
+        f"💰 {price:,} сум\n"
+        f"👥 Отправлено: {count} водителям"
+    )
+    return jsonify({'ok': True, 'message': f'Заказ отправлен {count} водителям!'})
 
-@app.route('/api/orders/pending', methods=['GET'])
-def get_pending_order():
-    car = request.args.get('car','')
-    if not car:
-        return jsonify({"has_order": False})
-    for order in reversed(orders_db):
-        if order['car_number'] == car and order['status'] == 'pending':
-            return jsonify({"has_order": True, **order})
-    return jsonify({"has_order": False})
+@app.route('/api/orders/complete', methods=['POST'])
+def complete_order():
+    data     = request.json
+    order_id = data.get('order_id')
+    stars    = data.get('stars', 5)
+    db_update_order_status(order_id, 'completed')
+    orders = db_get_orders()
+    order  = next((o for o in orders if o['id'] == order_id), None)
+    if order:
+        db_add_rating(order['car_number'], stars)
+        db_update_balance(
+            order['car_number'],
+            db_get_all_drivers()[0]['balance'] + order['price']
+        )
+    return jsonify({'ok': True, 'message': 'Заказ завершён!'})
 
-@app.route('/api/orders/respond', methods=['POST'])
-def respond_to_order():
-    data = request.json
-    order_id = int(data.get('order_id', 0))
-    car = data.get('car_number','')
-    action = data.get('response','')
-    for order in orders_db:
-        if order['id'] == order_id:
-            order['status'] = action
-            if action == 'accepted':
-                add_bonus(car, 2)
-                # ✅ Добавляем выручку
-                add_revenue(car, order.get('price', 0))
-            break
-    if action == 'accepted':
-        tg_send(f"✅ <b>{car}</b> принял заказ")
-    else:
-        tg_send(f"❌ <b>{car}</b> отклонил заказ")
-    return jsonify({"success": True})
+@app.route('/api/orders/cancel', methods=['POST'])
+def cancel_order():
+    data     = request.json
+    order_id = data.get('order_id')
+    db_update_order_status(order_id, 'cancelled')
+    return jsonify({'ok': True, 'message': 'Заказ отменён!'})
 
-@app.route('/api/orders/list', methods=['GET'])
-def list_orders():
-    return jsonify(list(reversed(orders_db))[:100])
+# --- Статистика ---
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    drivers = db_get_all_drivers()
+    orders  = db_get_orders()
+    online  = sum(1 for d in drivers
+                  if d['car_number'] in online_drivers)
+    free    = sum(1 for d in drivers
+                  if online_drivers.get(d['car_number'], {}).get('status') == 'free')
+    busy    = sum(1 for d in drivers
+                  if online_drivers.get(d['car_number'], {}).get('status') == 'busy')
+    active  = sum(1 for o in orders if o['status'] == 'pending')
+    revenue = sum(o['price'] for o in orders if o['status'] == 'completed')
+    return jsonify({
+        'ok': True,
+        'online': online,
+        'free': free,
+        'busy': busy,
+        'total_drivers': len(drivers),
+        'active_orders': active,
+        'revenue': revenue
+    })
+
+# --- Чат ---
+@app.route('/api/chat/<car>', methods=['GET'])
+def get_chat(car):
+    messages = db_get_messages(car.upper())
+    return jsonify({'ok': True, 'messages': messages})
 
 @app.route('/api/chat/send', methods=['POST'])
-def chat_send():
+def send_message():
+    data   = request.json
+    car    = data.get('car_number', '').upper()
+    text   = data.get('text', '').strip()
+    sender = data.get('sender', 'admin')
+    if not car or not text:
+        return jsonify({'ok': False, 'error': 'Пустое сообщение!'})
+    db_add_message(car, sender, text)
+    return jsonify({'ok': True, 'message': 'Отправлено!'})
+
+# --- Рейтинг ---
+@app.route('/api/rating', methods=['GET'])
+def get_rating():
+    drivers = db_get_all_drivers()
+    result  = []
+    for d in drivers:
+        r = db_get_rating(d['car_number'])
+        result.append({
+            'car_number': d['car_number'],
+            'name': d['name'],
+            'avg': r['avg'],
+            'count': r['count'],
+            'orders': r['orders']
+        })
+    result.sort(key=lambda x: x['avg'], reverse=True)
+    return jsonify({'ok': True, 'ratings': result})
+
+# --- Авторизация водителя ---
+@app.route('/api/driver/login', methods=['POST'])
+def driver_login():
     data = request.json
-    car = data.get('car_number','')
-    text = data.get('text','')
-    drv = data.get('driver','')
-    t = datetime.now().strftime('%H:%M')
-    if car not in chat_messages:
-        chat_messages[car] = []
-    chat_messages[car].append({
-        "id": int(time.time() * 1000) + random.randint(0,999),
-        "car_number": car,
-        "from": "driver",
-        "text": text,
-        "time": t
-    })
-    tg_send(f"💬 <b>{drv}</b> ({car}):\n{text}")
-    return jsonify({"success": True})
-
-@app.route('/api/chat/messages', methods=['GET'])
-def chat_get():
-    car = request.args.get('car','')
-    return jsonify(chat_messages.get(car, [])[-50:])
-
-@app.route('/api/chat/dispatch', methods=['POST'])
-def chat_dispatch():
-    data = request.json
-    car = data.get('car_number','')
-    text = data.get('text','')
-    t = datetime.now().strftime('%H:%M')
-    if car not in chat_messages:
-        chat_messages[car] = []
-    chat_messages[car].append({
-        "id": int(time.time() * 1000) + random.randint(0,999),
-        "car_number": car,
-        "from": "dispatcher",
-        "text": text,
-        "time": t
-    })
-    return jsonify({"success": True})
-
-@app.route('/ping')
-def ping():
+    car  = data.get('car_number', '').strip().upper()
+    pin  = data.get('pin', '').strip()
+    conn = sqlite3.connect('taxi.db')
+    c    = conn.cursor()
+    c.execute('SELECT * FROM drivers WHERE car_number=? AND pin=?', (car, pin))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'ok': False, 'error': 'Неверный номер или ПИН!'})
     return jsonify({
-        'status': 'alive',
-        'drivers_online': len(drivers),
-        'drivers_total': len(driver_list),
-        'orders_active': len([o for o in orders_db if o['status'] == 'pending']),
-        'revenue_total': sum(revenue_db.values())
+        'ok': True,
+        'driver': {
+            'car_number': row[0],
+            'name': row[1],
+            'phone': row[2],
+            'balance': row[4]
+        }
     })
 
+# ==================== ГЛАВНАЯ СТРАНИЦА ====================
+@app.route('/')
+def index():
+    return render_template_string(ADMIN_HTML)
+
+# ==================== HTML ПАНЕЛЬ ====================
+ADMIN_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TAXI 3042 — Xazarasp</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #0a0a0a;
+    color: #fff;
+    min-height: 100vh;
+}
+
+/* NAVBAR */
+.navbar {
+    background: #111;
+    border-bottom: 2px solid #FFD700;
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 50px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+.navbar .logo {
+    font-size: 18px;
+    font-weight: bold;
+    color: #FFD700;
+    margin-right: 20px;
+}
+.nav-btn {
+    background: none;
+    border: none;
+    color: #aaa;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+.nav-btn:hover, .nav-btn.active {
+    background: #FFD700;
+    color: #000;
+    font-weight: bold;
+}
+.navbar .right {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.live-badge {
+    background: #1a3a1a;
+    color: #4CAF50;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    border: 1px solid #4CAF50;
+}
+.clock {
+    color: #FFD700;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+/* СТРАНИЦЫ */
+.page { display: none; padding: 20px; }
+.page.active { display: block; }
+
+/* КАРТОЧКИ СТАТИСТИКИ */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.stat-card {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    transition: transform 0.2s;
+}
+.stat-card:hover { transform: translateY(-3px); }
+.stat-card .num {
+    font-size: 32px;
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+.stat-card .label {
+    font-size: 11px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* БЫСТРЫЕ ДЕЙСТВИЯ */
+.quick-actions {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+.quick-actions h3 {
+    color: #FFD700;
+    margin-bottom: 15px;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.btn-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: bold;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.btn:hover { opacity: 0.85; transform: translateY(-1px); }
+.btn-yellow  { background: #FFD700; color: #000; }
+.btn-blue    { background: #1E88E5; color: #fff; }
+.btn-green   { background: #43A047; color: #fff; }
+.btn-red     { background: #E53935; color: #fff; }
+.btn-purple  { background: #8E24AA; color: #fff; }
+.btn-gray    { background: #333; color: #fff; }
+
+/* ТАБЛИЦА */
+.table-box {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    overflow: hidden;
+}
+.table-box h3 {
+    padding: 15px 20px;
+    color: #FFD700;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-bottom: 1px solid #333;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+th {
+    background: #222;
+    padding: 12px 15px;
+    text-align: left;
+    font-size: 11px;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+td {
+    padding: 12px 15px;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: 13px;
+}
+tr:hover td { background: #222; }
+.badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: bold;
+}
+.badge-green  { background: #1a3a1a; color: #4CAF50; }
+.badge-red    { background: #3a1a1a; color: #f44336; }
+.badge-yellow { background: #3a3a1a; color: #FFD700; }
+.badge-gray   { background: #2a2a2a; color: #888; }
+
+/* МОДАЛЬНОЕ ОКНО */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.8);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 16px;
+    padding: 30px;
+    width: 90%;
+    max-width: 500px;
+    position: relative;
+}
+.modal h2 {
+    color: #FFD700;
+    margin-bottom: 20px;
+    font-size: 18px;
+}
+.modal-close {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 20px;
+    cursor: pointer;
+}
+.modal-close:hover { color: #fff; }
+.form-group {
+    margin-bottom: 15px;
+}
+.form-group label {
+    display: block;
+    font-size: 12px;
+    color: #888;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+.form-group input,
+.form-group select,
+.form-group textarea {
+    width: 100%;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: #fff;
+    font-size: 14px;
+    outline: none;
+    transition: border 0.2s;
+}
+.form-group input:focus,
+.form-group select:focus {
+    border-color: #FFD700;
+}
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+.addr-btns {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+.addr-btn {
+    background: #222;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.addr-btn:hover {
+    background: #FFD700;
+    color: #000;
+    border-color: #FFD700;
+}
+
+/* ЧАТ */
+.chat-layout {
+    display: grid;
+    grid-template-columns: 250px 1fr;
+    gap: 15px;
+    height: calc(100vh - 140px);
+}
+.chat-list {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    overflow-y: auto;
+}
+.chat-list h3 {
+    padding: 15px;
+    color: #FFD700;
+    font-size: 13px;
+    border-bottom: 1px solid #333;
+}
+.chat-item {
+    padding: 12px 15px;
+    cursor: pointer;
+    border-bottom: 1px solid #222;
+    transition: background 0.2s;
+}
+.chat-item:hover, .chat-item.active { background: #222; }
+.chat-item .car { font-weight: bold; font-size: 13px; }
+.chat-item .preview { font-size: 11px; color: #666; margin-top: 3px; }
+.chat-window {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+}
+.chat-header {
+    padding: 15px;
+    border-bottom: 1px solid #333;
+    font-weight: bold;
+    color: #FFD700;
+}
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.msg {
+    max-width: 70%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+.msg.admin {
+    background: #FFD700;
+    color: #000;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+}
+.msg.driver {
+    background: #222;
+    color: #fff;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+}
+.chat-input-row {
+    padding: 15px;
+    border-top: 1px solid #333;
+    display: flex;
+    gap: 10px;
+}
+.chat-input-row input {
+    flex: 1;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: #fff;
+    font-size: 14px;
+    outline: none;
+}
+.chat-input-row input:focus { border-color: #FFD700; }
+
+/* УВЕДОМЛЕНИЕ */
+.toast {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 10px;
+    padding: 14px 20px;
+    font-size: 14px;
+    z-index: 9999;
+    display: none;
+    animation: slideIn 0.3s ease;
+    max-width: 300px;
+}
+@keyframes slideIn {
+    from { transform: translateX(100px); opacity: 0; }
+    to   { transform: translateX(0);     opacity: 1; }
+}
+
+/* ПУСТОЕ СОСТОЯНИЕ */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #444;
+}
+.empty-state .icon { font-size: 50px; margin-bottom: 15px; }
+.empty-state p { font-size: 14px; }
+
+/* ФИНАНСЫ */
+.finance-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+.finance-card {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 20px;
+}
+.finance-card h4 {
+    color: #888;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+}
+.finance-card .amount {
+    font-size: 24px;
+    font-weight: bold;
+    color: #FFD700;
+}
+</style>
+</head>
+<body>
+
+<!-- NAVBAR -->
+<nav class="navbar">
+    <div class="logo">🚕 TAXI 3042</div>
+    <button class="nav-btn active" onclick="showPage('dashboard')">📊 Дашборд</button>
+    <button class="nav-btn" onclick="showPage('orders')">📦 Заказы</button>
+    <button class="nav-btn" onclick="showPage('drivers')">🚗 Водители</button>
+    <button class="nav-btn" onclick="showPage('rating')">⭐ Рейтинг</button>
+    <button class="nav-btn" onclick="showPage('chat')">💬 Чат</button>
+    <button class="nav-btn" onclick="showPage('finance')">💰 Финансы</button>
+    <button class="nav-btn" onclick="showPage('settings')">⚙️ Настройки</button>
+    <div class="right">
+        <span class="clock" id="clock">00:00:00</span>
+        <span class="live-badge">🟢 Live</span>
+    </div>
+</nav>
+
+<!-- ДАШБОРД -->
+<div class="page active" id="page-dashboard">
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="num" id="stat-online" style="color:#4CAF50">0</div>
+            <div class="label">На линии</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" id="stat-free" style="color:#2196F3">0</div>
+            <div class="label">Свободны</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" id="stat-busy" style="color:#f44336">0</div>
+            <div class="label">На заказе</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" id="stat-total" style="color:#FFD700">0</div>
+            <div class="label">Всего водит.</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" id="stat-orders" style="color:#9C27B0">0</div>
+            <div class="label">Активн. заказов</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" id="stat-revenue" style="color:#4CAF50">0</div>
+            <div class="label">Выручка (сум)</div>
+        </div>
+    </div>
+
+    <div class="quick-actions">
+        <h3>⚡ Быстрые действия</h3>
+        <div class="btn-row">
+            <button class="btn btn-yellow" onclick="openModal('modalOrder')">
+                🚖 Новый заказ
+            </button>
+            <button class="btn btn-blue" onclick="showPage('chat')">
+                💬 Открыть чат
+            </button>
+            <button class="btn btn-green" onclick="openModal('modalDriver')">
+                ➕ Добавить водителя
+            </button>
+            <button class="btn btn-purple" onclick="exportReport()">
+                📊 Экспорт отчёта
+            </button>
+            <button class="btn btn-red" onclick="resetShift()">
+                🔄 Сбросить смену
+            </button>
+        </div>
+    </div>
+
+    <div class="table-box">
+        <h3>🚗 Водители онлайн</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Авто</th>
+                    <th>Водитель</th>
+                    <th>Статус</th>
+                    <th>Скорость</th>
+                    <th>Баланс</th>
+                    <th>Рейтинг</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="driversTable">
+                <tr>
+                    <td colspan="7">
+                        <div class="empty-state">
+                            <div class="icon">🚗</div>
+                            <p>Водители выйдут на линию</p>
+                        </div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ЗАКАЗЫ -->
+<div class="page" id="page-orders">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+        <h2 style="color:#FFD700;">📦 Заказы</h2>
+        <button class="btn btn-yellow" onclick="openModal('modalOrder')">
+            ➕ Новый заказ
+        </button>
+    </div>
+    <div class="table-box">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Авто</th>
+                    <th>Откуда</th>
+                    <th>Куда</th>
+                    <th>Цена</th>
+                    <th>Клиент</th>
+                    <th>Статус</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="ordersTable">
+                <tr><td colspan="8">
+                    <div class="empty-state">
+                        <div class="icon">📦</div>
+                        <p>Нет заказов</p>
+                    </div>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ВОДИТЕЛИ -->
+<div class="page" id="page-drivers">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+        <h2 style="color:#FFD700;">🚗 Водители</h2>
+        <button class="btn btn-yellow" onclick="openModal('modalDriver')">
+            ➕ Добавить водителя
+        </button>
+    </div>
+    <div class="table-box">
+        <table>
+            <thead>
+                <tr>
+                    <th>Авто</th>
+                    <th>Имя</th>
+                    <th>Телефон</th>
+                    <th>ПИН</th>
+                    <th>Баланс</th>
+                    <th>Статус</th>
+                    <th>Рейтинг</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="allDriversTable">
+                <tr><td colspan="8">
+                    <div class="empty-state">
+                        <div class="icon">🚗</div>
+                        <p>Нет водителей</p>
+                    </div>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- РЕЙТИНГ -->
+<div class="page" id="page-rating">
+    <h2 style="color:#FFD700;margin-bottom:15px;">⭐ Рейтинг водителей</h2>
+    <div class="table-box">
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Авто</th>
+                    <th>Имя</th>
+                    <th>Рейтинг</th>
+                    <th>Оценок</th>
+                    <th>Заказов</th>
+                </tr>
+            </thead>
+            <tbody id="ratingTable">
+                <tr><td colspan="6">
+                    <div class="empty-state">
+                        <div class="icon">⭐</div>
+                        <p>Нет данных</p>
+                    </div>
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ЧАТ -->
+<div class="page" id="page-chat">
+    <h2 style="color:#FFD700;margin-bottom:15px;">💬 Чат с водителями</h2>
+    <div class="chat-layout">
+        <div class="chat-list">
+            <h3>Водители</h3>
+            <div id="chatDriversList"></div>
+        </div>
+        <div class="chat-window">
+            <div class="chat-header" id="chatHeader">
+                Выберите водителя
+            </div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="empty-state">
+                    <div class="icon">💬</div>
+                    <p>Выберите водителя для чата</p>
+                </div>
+            </div>
+            <div class="chat-input-row">
+                <input type="text" id="chatInput"
+                       placeholder="Написать сообщение..."
+                       onkeypress="if(event.key==='Enter') sendChat()">
+                <button class="btn btn-yellow" onclick="sendChat()">
+                    ➤ Отправить
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ФИНАНСЫ -->
+<div class="page" id="page-finance">
+    <h2 style="color:#FFD700;margin-bottom:15px;">💰 Финансы</h2>
+    <div class="finance-grid">
+        <div class="finance-card">
+            <h4>Общая выручка</h4>
+            <div class="amount" id="finRevenue">0 сум</div>
+        </div>
+        <div class="finance-card">
+            <h4>Завершённых заказов</h4>
+            <div class="amount" id="finCompleted">0</div>
+        </div>
+        <div class="finance-card">
+            <h4>Отменённых заказов</h4>
+            <div class="amount" id="finCancelled">0</div>
+        </div>
+        <div class="finance-card">
+            <h4>Всего заказов</h4>
+            <div class="amount" id="finTotal">0</div>
+        </div>
+    </div>
+    <div class="table-box">
+        <h3>💳 Балансы водителей</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Авто</th>
+                    <th>Имя</th>
+                    <th>Баланс</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody id="balanceTable"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- НАСТРОЙКИ -->
+<div class="page" id="page-settings">
+    <h2 style="color:#FFD700;margin-bottom:20px;">⚙️ Настройки</h2>
+    <div class="quick-actions">
+        <h3>🚕 Тарифы</h3>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Базовая ставка (сум)</label>
+                <input type="number" id="setBaseFare" value="5000">
+            </div>
+            <div class="form-group">
+                <label>Город (сум/км)</label>
+                <input type="number" id="setCityRate" value="2800">
+            </div>
+            <div class="form-group">
+                <label>Пригород (сум/км)</label>
+                <input type="number" id="setSuburbRate" value="3000">
+            </div>
+            <div class="form-group">
+                <label>Ожидание (сум/мин)</label>
+                <input type="number" id="setWaitRate" value="500">
+            </div>
+        </div>
+        <button class="btn btn-yellow" onclick="saveTariffs()">
+            💾 Сохранить тарифы
+        </button>
+    </div>
+</div>
+
+<!-- МОДАЛ: НОВЫЙ ЗАКАЗ -->
+<div class="modal-overlay" id="modalOrder">
+    <div class="modal">
+        <button class="modal-close" onclick="closeModal('modalOrder')">✕</button>
+        <h2>🚖 Новый заказ</h2>
+        <div class="form-group">
+            <label>Водитель</label>
+            <select id="orderCar">
+                <option value="ALL">📢 Всем водителям</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Откуда</label>
+            <input type="text" id="orderFrom" placeholder="Адрес отправления">
+            <div class="addr-btns">
+                <button class="addr-btn" onclick="setAddr('orderFrom','Bozor')">📍 Bozor</button>
+                <button class="addr-btn" onclick="setAddr('orderFrom','Aeroport')">✈️ Aeroport</button>
+                <button class="addr-btn" onclick="setAddr('orderFrom','Kasalxona')">🏥 Kasalxona</button>
+                <button class="addr-btn" onclick="setAddr('orderFrom','Vokzal')">🚉 Vokzal</button>
+                <button class="addr-btn" onclick="setAddr('orderFrom','Maktab')">🏫 Maktab</button>
+                <button class="addr-btn" onclick="setAddr('orderFrom','Markaziy')">🛒 Markaziy</button>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Куда</label>
+            <input type="text" id="orderTo" placeholder="Адрес назначения">
+            <div class="addr-btns">
+                <button class="addr-btn" onclick="setAddr('orderTo','Bozor')">📍 Bozor</button>
+                <button class="addr-btn" onclick="setAddr('orderTo','Aeroport')">✈️ Aeroport</button>
+                <button class="addr-btn" onclick="setAddr('orderTo','Kasalxona')">🏥 Kasalxona</button>
+                <button class="addr-btn" onclick="setAddr('orderTo','Vokzal')">🚉 Vokzal</button>
+                <button class="addr-btn" onclick="setAddr('orderTo','Maktab')">🏫 Maktab</button>
+                <button class="addr-btn" onclick="setAddr('orderTo','Markaziy')">🛒 Markaziy</button>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Цена (сум)</label>
+                <input type="number" id="orderPrice" placeholder="25000">
+            </div>
+            <div class="form-group">
+                <label>Клиент</label>
+                <input type="text" id="orderClient" placeholder="Имя клиента">
+            </div>
+        </div>
+        <button class="btn btn-yellow" style="width:100%;justify-content:center;"
+                onclick="submitOrder()">
+            ✅ Создать заказ
+        </button>
+    </div>
+</div>
+
+<!-- МОДАЛ: ДОБАВИТЬ ВОДИТЕЛЯ -->
+<div class="modal-overlay" id="modalDriver">
+    <div class="modal">
+        <button class="modal-close" onclick="closeModal('modalDriver')">✕</button>
+        <h2>➕ Добавить водителя</h2>
+        <div class="form-group">
+            <label>Номер авто</label>
+            <input type="text" id="driverCar" placeholder="90T785OA">
+        </div>
+        <div class="form-group">
+            <label>Имя водителя</label>
+            <input type="text" id="driverName" placeholder="Иван Иванов">
+        </div>
+        <div class="form-group">
+            <label>Телефон</label>
+            <input type="text" id="driverPhone" placeholder="+998901234567">
+        </div>
+        <button class="btn btn-yellow" style="width:100%;justify-content:center;"
+                onclick="submitDriver()">
+            ✅ Добавить
+        </button>
+        <div id="driverMsg" style="margin-top:15px;text-align:center;font-size:14px;"></div>
+    </div>
+</div>
+
+<!-- МОДАЛ: ПОПОЛНИТЬ БАЛАНС -->
+<div class="modal-overlay" id="modalBalance">
+    <div class="modal">
+        <button class="modal-close" onclick="closeModal('modalBalance')">✕</button>
+        <h2>💰 Пополнить баланс</h2>
+        <input type="hidden" id="balanceCar">
+        <div class="form-group">
+            <label>Новый баланс (сум)</label>
+            <input type="number" id="balanceAmount" placeholder="50000">
+        </div>
+        <button class="btn btn-yellow" style="width:100%;justify-content:center;"
+                onclick="submitBalance()">
+            ✅ Обновить
+        </button>
+    </div>
+</div>
+
+<!-- УВЕДОМЛЕНИЕ -->
+<div class="toast" id="toast"></div>
+
+<script>
+// ==================== НАВИГАЦИЯ ====================
+function showPage(name) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('page-' + name).classList.add('active');
+    event.target.classList.add('active');
+
+    if (name === 'orders')  loadOrders();
+    if (name === 'drivers') loadAllDrivers();
+    if (name === 'rating')  loadRating();
+    if (name === 'chat')    loadChatDrivers();
+    if (name === 'finance') loadFinance();
+}
+
+// ==================== МОДАЛЫ ====================
+function openModal(id) {
+    document.getElementById(id).classList.add('open');
+    if (id === 'modalOrder') loadDriversSelect();
+}
+function closeModal(id) {
+    document.getElementById(id).classList.remove('open');
+}
+document.querySelectorAll('.modal-overlay').forEach(m => {
+    m.addEventListener('click', function(e) {
+        if (e.target === this) this.classList.remove('open');
+    });
+});
+
+// ==================== ЧАСЫ ====================
+function updateClock() {
+    const now = new Date();
+    document.getElementById('clock').textContent =
+        now.toTimeString().slice(0,8);
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ==================== УВЕДОМЛЕНИЯ ====================
+function toast(msg, color='#4CAF50') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.color = color;
+    t.style.display = 'block';
+    setTimeout(() => t.style.display = 'none', 3000);
+}
+
+// ==================== СТАТИСТИКА ====================
+async function loadStats() {
+    try {
+        const r = await fetch('/api/stats');
+        const d = await r.json();
+        if (!d.ok) return;
+        document.getElementById('stat-online').textContent  = d.online;
+        document.getElementById('stat-free').textContent   = d.free;
+        document.getElementById('stat-busy').textContent   = d.busy;
+        document.getElementById('stat-total').textContent  = d.total_drivers;
+        document.getElementById('stat-orders').textContent = d.active_orders;
+        document.getElementById('stat-revenue').textContent =
+            d.revenue.toLocaleString();
+    } catch(e) { console.error(e); }
+}
+
+// ==================== ВОДИТЕЛИ ОНЛАЙН ====================
+async function loadOnlineDrivers() {
+    try {
+        const r = await fetch('/api/drivers');
+        const d = await r.json();
+        if (!d.ok) return;
+        const tbody = document.getElementById('driversTable');
+        const online = d.drivers.filter(dr => dr.status !== 'offline');
+        if (!online.length) {
+            tbody.innerHTML = `<tr><td colspan="7">
+                <div class="empty-state">
+                    <div class="icon">🚗</div>
+                    <p>Водители выйдут на линию</p>
+                </div></td></tr>`;
+            return;
+        }
+        tbody.innerHTML = online.map(dr => `
+            <tr>
+                <td><b>${dr.car_number}</b></td>
+                <td>${dr.name}</td>
+                <td>${statusBadge(dr.status)}</td>
+                <td>${dr.speed || 0} км/ч</td>
+                <td>${(dr.balance||0).toLocaleString()} сум</td>
+                <td>${stars(dr.rating||5.0)} ${dr.rating||5.0}</td>
+                <td>
+                    <button class="btn btn-yellow" style="padding:5px 10px;font-size:11px;"
+                        onclick="openOrder('${dr.car_number}')">📦 Заказ</button>
+                    <button class="btn btn-blue" style="padding:5px 10px;font-size:11px;"
+                        onclick="openChatWith('${dr.car_number}')">💬</button>
+                </td>
+            </tr>
+        `).join('');
+    } catch(e) { console.error(e); }
+}
+
+// ==================== ВСЕ ВОДИТЕЛИ ====================
+async function loadAllDrivers() {
+    try {
+        const r = await fetch('/api/drivers');
+        const d = await r.json();
+        if (!d.ok) return;
+        const tbody = document.getElementById('allDriversTable');
+        if (!d.drivers.length) {
+            tbody.innerHTML = `<tr><td colspan="8">
+                <div class="empty-state">
+                    <div class="icon">🚗</div>
+                    <p>Нет водителей. Добавьте первого!</p>
+                </div></td></tr>`;
+            return;
+        }
+        tbody.innerHTML = d.drivers.map(dr => `
+            <tr>
+                <td><b>${dr.car_number}</b></td>
+                <td>${dr.name}</td>
+                <td>${dr.phone}</td>
+                <td><span class="badge badge-yellow">${dr.pin}</span></td>
+                <td>${(dr.balance||0).toLocaleString()} сум</td>
+                <td>${statusBadge(dr.status)}</td>
+                <td>${stars(dr.rating||5.0)} ${dr.rating||5.0}</td>
+                <td>
+                    <button class="btn btn-green" style="padding:5px 10px;font-size:11px;"
+                        onclick="editBalance('${dr.car_number}',${dr.balance||0})">
+                        💰 Баланс
+                    </button>
+                    <button class="btn btn-red" style="padding:5px 10px;font-size:11px;"
+                        onclick="deleteDriver('${dr.car_number}')">
+                        🗑️
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    } catch(e) { console.error(e); }
+}
+
+// ==================== ЗАКАЗЫ ====================
+async function loadOrders() {
+    try {
+        const r = await fetch('/api/orders');
+        const d = await r.json();
+        if (!d.ok) return;
+        const tbody = document.getElementById('ordersTable');
+        if (!d.orders.length) {
+            tbody.innerHTML = `<tr><td colspan="8">
+                <div class="empty-state">
+                    <div class="icon">📦</div>
+                    <p>Нет заказов</p>
+                </div></td></tr>`;
+            return;
+        }
+        tbody.innerHTML = d.orders.map(o => `
+            <tr>
+                <td>#${o.id}</td>
+                <td><b>${o.car_number}</b></td>
+                <td>${o.from_address}</td>
+                <td>${o.to_address}</td>
+                <td>${(o.price||0).toLocaleString()} сум</td>
+                <td>${o.client||'—'}</td>
+                <td>${orderBadge(o.status)}</td>
+                <td>
+                    ${o.status === 'pending' ? `
+                    <button class="btn btn-green" style="padding:5px 10px;font-size:11px;"
+                        onclick="completeOrder(${o.id})">✅</button>
+                    <button class="btn btn-red" style="padding:5px 10px;font-size:11px;"
+                        onclick="cancelOrder(${o.id})">❌</button>
+                    ` : '—'}
+                </td>
+            </tr>
+        `).join('');
+    } catch(e) { console.error(e); }
+}
+
+// ==================== РЕЙТИНГ ====================
+async function loadRating() {
+    try {
+        const r = await fetch('/api/rating');
+        const d = await r.json();
+        if (!d.ok) return;
+        const tbody = document.getElementById('ratingTable');
+        if (!d.ratings.length) {
+            tbody.innerHTML = `<tr><td colspan="6">
+                <div class="empty-state">
+                    <div class="icon">⭐</div>
+                    <p>Нет данных</p>
+                </div></td></tr>`;
+            return;
+        }
+        tbody.innerHTML = d.ratings.map((r, i) => `
+            <tr>
+                <td>${i+1}</td>
+                <td><b>${r.car_number}</b></td>
+                <td>${r.name}</td>
+                <td>${stars(r.avg)} ${r.avg}</td>
+                <td>${r.count}</td>
+                <td>${r.orders}</td>
+            </tr>
+        `).join('');
+    } catch(e) { console.error(e); }
+}
+
+// ==================== ЧАТ ====================
+let currentChatCar = null;
+let chatInterval   = null;
+
+async function loadChatDrivers() {
+    try {
+        const r = await fetch('/api/drivers');
+        const d = await r.json();
+        if (!d.ok) return;
+        const list = document.getElementById('chatDriversList');
+        if (!d.drivers.length) {
+            list.innerHTML = '<div style="padding:15px;color:#666;font-size:13px;">Нет водителей</div>';
+            return;
+        }
+        list.innerHTML = d.drivers.map(dr => `
+            <div class="chat-item" onclick="openChatWith('${dr.car_number}')">
+                <div class="car">${dr.car_number}</div>
+                <div class="preview">${dr.name}</div>
+            </div>
+        `).join('');
+    } catch(e) { console.error(e); }
+}
+
+async function openChatWith(car) {
+    currentChatCar = car;
+    document.getElementById('chatHeader').textContent = `💬 Чат с ${car}`;
+    document.querySelectorAll('.chat-item').forEach(i => i.classList.remove('active'));
+    showPage('chat');
+    await loadChatMessages();
+    if (chatInterval) clearInterval(chatInterval);
+    chatInterval = setInterval(loadChatMessages, 3000);
+}
+
+async function loadChatMessages() {
+    if (!currentChatCar) return;
+    try {
+        const r = await fetch(`/api/chat/${currentChatCar}`);
+        const d = await r.json();
+        if (!d.ok) return;
+        const box = document.getElementById('chatMessages');
+        if (!d.messages.length) {
+            box.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>Нет сообщений</p></div>';
+            return;
+        }
+        box.innerHTML = d.messages.map(m => `
+            <div class="msg ${m.sender === 'admin' ? 'admin' : 'driver'}">
+                ${m.text}
+            </div>
+        `).join('');
+        box.scrollTop = box.scrollHeight;
+    } catch(e) { console.error(e); }
+}
+
+async function sendChat() {
+    if (!currentChatCar) { toast('Выберите водителя!', '#f44336'); return; }
+    const input = document.getElementById('chatInput');
+    const text  = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    try {
+        const r = await fetch('/api/chat/send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({car_number: currentChatCar, text, sender: 'admin'})
+        });
+        const d = await r.json();
+        if (d.ok) await loadChatMessages();
+    } catch(e) { console.error(e); }
+}
+
+// ==================== ФИНАНСЫ ====================
+async function loadFinance() {
+    try {
+        const r1 = await fetch('/api/orders');
+        const d1 = await r1.json();
+        if (d1.ok) {
+            const completed = d1.orders.filter(o => o.status === 'completed');
+            const cancelled = d1.orders.filter(o => o.status === 'cancelled');
+            const revenue   = completed.reduce((s, o) => s + o.price, 0);
+            document.getElementById('finRevenue').textContent   = revenue.toLocaleString() + ' сум';
+            document.getElementById('finCompleted').textContent = completed.length;
+            document.getElementById('finCancelled').textContent = cancelled.length;
+            document.getElementById('finTotal').textContent     = d1.orders.length;
+        }
+        const r2 = await fetch('/api/drivers');
+        const d2 = await r2.json();
+        if (d2.ok) {
+            const tbody = document.getElementById('balanceTable');
+            tbody.innerHTML = d2.drivers.map(dr => `
+                <tr>
+                    <td><b>${dr.car_number}</b></td>
+                    <td>${dr.name}</td>
+                    <td>${(dr.balance||0).toLocaleString()} сум</td>
+                    <td>
+                        <button class="btn btn-green" style="padding:5px 10px;font-size:11px;"
+                            onclick="editBalance('${dr.car_number}',${dr.balance||0})">
+                            💰 Изменить
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+    } catch(e) { console.error(e); }
+}
+
+// ==================== ДЕЙСТВИЯ ====================
+async function loadDriversSelect() {
+    try {
+        const r = await fetch('/api/drivers');
+        const d = await r.json();
+        if (!d.ok) return;
+        const sel = document.getElementById('orderCar');
+        sel.innerHTML = '<option value="ALL">📢 Всем водителям</option>' +
+            d.drivers.map(dr =>
+                `<option value="${dr.car_number}">${dr.car_number} — ${dr.name}</option>`
+            ).join('');
+    } catch(e) { console.error(e); }
+}
+
+function setAddr(fieldId, addr) {
+    document.getElementById(fieldId).value = addr;
+}
+
+function openOrder(car) {
+    openModal('modalOrder');
+    setTimeout(() => {
+        const sel = document.getElementById('orderCar');
+        for (let o of sel.options) {
+            if (o.value === car) { o.selected = true; break; }
+        }
+    }, 300);
+}
+
+async function submitOrder() {
+    const car    = document.getElementById('orderCar').value;
+    const from   = document.getElementById('orderFrom').value.trim();
+    const to     = document.getElementById('orderTo').value.trim();
+    const price  = parseInt(document.getElementById('orderPrice').value);
+    const client = document.getElementById('orderClient').value.trim() || 'Клиент';
+
+    if (!from)          { toast('❌ Введите откуда!',          '#f44336'); return; }
+    if (!to)            { toast('❌ Введите куда!',             '#f44336'); return; }
+    if (!price || price <= 0) { toast('❌ Введите цену!',      '#f44336'); return; }
+
+    const url  = car === 'ALL' ? '/api/orders/broadcast' : '/api/orders/create';
+    const body = car === 'ALL'
+        ? {from_address: from, to_address: to, price, client}
+        : {car_number: car, from_address: from, to_address: to, price, client};
+
+    try {
+        const r = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body)
+        });
+        const d = await r.json();
+        if (d.ok) {
+            toast('✅ ' + d.message);
+            closeModal('modalOrder');
+            document.getElementById('orderFrom').value  = '';
+            document.getElementById('orderTo').value    = '';
+            document.getElementById('orderPrice').value = '';
+            document.getElementById('orderClient').value = '';
+        } else {
+            toast('❌ ' + d.error, '#f44336');
+        }
+    } catch(e) { toast('❌ Ошибка сети', '#f44336'); }
+}
+
+async function submitDriver() {
+    const car   = document.getElementById('driverCar').value.trim();
+    const name  = document.getElementById('driverName').value.trim();
+    const phone = document.getElementById('driverPhone').value.trim();
+    const msg   = document.getElementById('driverMsg');
+
+    if (!car || !name || !phone) {
+        msg.style.color = '#f44336';
+        msg.textContent = '❌ Заполните все поля!';
+        return;
+    }
+    try {
+        const r = await fetch('/api/drivers/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({car_number: car, name, phone})
+        });
+        const d = await r.json();
+        if (d.ok) {
+            msg.style.color = '#4CAF50';
+            msg.textContent = `✅ Добавлен! ПИН: ${d.pin}`;
+            document.getElementById('driverCar').value   = '';
+            document.getElementById('driverName').value  = '';
+            document.getElementById('driverPhone').value = '';
+            loadAllDrivers();
+            loadStats();
+            setTimeout(() => closeModal('modalDriver'), 2000);
+        } else {
+            msg.style.color = '#f44336';
+            msg.textContent = '❌ ' + d.error;
+        }
+    } catch(e) {
+        msg.style.color = '#f44336';
+        msg.textContent = '❌ Ошибка сети';
+    }
+}
+
+function editBalance(car, current) {
+    document.getElementById('balanceCar').value    = car;
+    document.getElementById('balanceAmount').value = current;
+    openModal('modalBalance');
+}
+
+async function submitBalance() {
+    const car    = document.getElementById('balanceCar').value;
+    const amount = parseInt(document.getElementById('balanceAmount').value);
+    try {
+        const r = await fetch('/api/drivers/balance', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({car_number: car, amount})
+        });
+        const d = await r.json();
+        if (d.ok) {
+            toast('✅ Баланс обновлён!');
+            closeModal('modalBalance');
+            loadAllDrivers();
+            loadFinance();
+        }
+    } catch(e) { toast('❌ Ошибка', '#f44336'); }
+}
+
+async function deleteDriver(car) {
+    if (!confirm(`Удалить водителя ${car}?`)) return;
+    try {
+        const r = await fetch('/api/drivers/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({car_number: car})
+        });
+        const d = await r.json();
+        if (d.ok) { toast('✅ Удалён!'); loadAllDrivers(); loadStats(); }
+    } catch(e) { toast('❌ Ошибка', '#f44336'); }
+}
+
+async function completeOrder(id) {
+    try {
+        const r = await fetch('/api/orders/complete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({order_id: id, stars: 5})
+        });
+        const d = await r.json();
+        if (d.ok) { toast('✅ Заказ завершён!'); loadOrders(); }
+    } catch(e) { toast('❌ Ошибка', '#f44336'); }
+}
+
+async function cancelOrder(id) {
+    try {
+        const r = await fetch('/api/orders/cancel', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({order_id: id})
+        });
+        const d = await r.json();
+        if (d.ok) { toast('✅ Заказ отменён!'); loadOrders(); }
+    } catch(e) { toast('❌ Ошибка', '#f44336'); }
+}
+
+async function saveTariffs() {
+    toast('✅ Тарифы сохранены!');
+}
+
+function exportReport() {
+    fetch('/api/orders')
+    .then(r => r.json())
+    .then(d => {
+        if (!d.ok) return;
+        let csv = 'ID,Авто,Откуда,Куда,Цена,Клиент,Статус\n';
+        d.orders.forEach(o => {
+            csv += `${o.id},${o.car_number},${o.from_address},${o.to_address},${o.price},${o.client},${o.status}\n`;
+        });
+        const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = 'taxi_report.csv';
+        a.click();
+        toast('✅ Отчёт скачан!');
+    });
+}
+
+function resetShift() {
+    if (!confirm('Сбросить смену? Все данные о выручке будут обнулены.')) return;
+    toast('✅ Смена сброшена!');
+}
+
+// ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
+function statusBadge(status) {
+    const map = {
+        'free':    '<span class="badge badge-green">🟢 Свободен</span>',
+        'busy':    '<span class="badge badge-red">🔴 На заказе</span>',
+        'offline': '<span class="badge badge-gray">⚫ Офлайн</span>'
+    };
+    return map[status] || '<span class="badge badge-gray">—</span>';
+}
+
+function orderBadge(status) {
+    const map = {
+        'pending':   '<span class="badge badge-yellow">⏳ Ожидает</span>',
+        'completed': '<span class="badge badge-green">✅ Завершён</span>',
+        'cancelled': '<span class="badge badge-red">❌ Отменён</span>'
+    };
+    return map[status] || status;
+}
+
+function stars(avg) {
+    if (avg >= 4.8) return '⭐⭐⭐⭐⭐';
+    if (avg >= 4.0) return '⭐⭐⭐⭐';
+    if (avg >= 3.0) return '⭐⭐⭐';
+    if (avg >= 2.0) return '⭐⭐';
+    return '⭐';
+}
+
+// ==================== АВТООБНОВЛЕНИЕ ====================
+setInterval(() => {
+    loadStats();
+    loadOnlineDrivers();
+}, 5000);
+
+loadStats();
+loadOnlineDrivers();
+</script>
+</body>
+</html>"""
+
+# ==================== ЗАПУСК ====================
 if __name__ == '__main__':
-    print("🚕 TAXI 3042 XAZARASP — STARTED")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
