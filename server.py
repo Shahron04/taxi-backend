@@ -10,7 +10,6 @@ from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
-# ==================== БАЗА ДАННЫХ ====================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_db():
@@ -21,7 +20,6 @@ def init_db():
     try:
         conn = get_db()
         c = conn.cursor()
-
         c.execute('''CREATE TABLE IF NOT EXISTS driver_list (
             id TEXT PRIMARY KEY,
             name TEXT,
@@ -31,7 +29,6 @@ def init_db():
             balance INTEGER DEFAULT 50000,
             status TEXT DEFAULT 'offline'
         )''')
-
         c.execute('''CREATE TABLE IF NOT EXISTS pending_codes (
             pin_id TEXT PRIMARY KEY,
             name TEXT,
@@ -41,7 +38,6 @@ def init_db():
             status TEXT DEFAULT 'pending',
             created_at REAL
         )''')
-
         c.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
             id SERIAL PRIMARY KEY,
             car_number TEXT,
@@ -49,12 +45,10 @@ def init_db():
             text TEXT,
             time TEXT
         )''')
-
         c.execute('''CREATE TABLE IF NOT EXISTS balances (
             car_number TEXT PRIMARY KEY,
             balance INTEGER DEFAULT 50000
         )''')
-
         c.execute('''CREATE TABLE IF NOT EXISTS tariffs (
             id INTEGER PRIMARY KEY DEFAULT 1,
             base_fare INTEGER DEFAULT 5000,
@@ -62,12 +56,9 @@ def init_db():
             suburb_rate INTEGER DEFAULT 3000,
             wait_rate INTEGER DEFAULT 500
         )''')
-
         c.execute('''INSERT INTO tariffs (id, base_fare, city_rate, suburb_rate, wait_rate)
                      VALUES (1, 5000, 2800, 3000, 500)
                      ON CONFLICT (id) DO NOTHING''')
-
-        # ✅ Заявки на пополнение баланса
         c.execute('''CREATE TABLE IF NOT EXISTS balance_requests (
             id SERIAL PRIMARY KEY,
             car_number TEXT,
@@ -75,8 +66,6 @@ def init_db():
             status TEXT DEFAULT 'pending',
             created_at REAL
         )''')
-
-        # ✅ Заказы
         c.execute('''CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             order_num INTEGER,
@@ -89,7 +78,6 @@ def init_db():
             status TEXT DEFAULT 'pending',
             created_at REAL
         )''')
-
         conn.commit()
         conn.close()
         print("✅ База данных инициализирована")
@@ -105,11 +93,7 @@ TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}"
 
 def tg_send(text, reply_markup=None):
     try:
-        data = {
-            "chat_id": TG_CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML"
-        }
+        data = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
         if reply_markup:
             import json
             data["reply_markup"] = json.dumps(reply_markup)
@@ -157,17 +141,14 @@ def tg_notify_rejected(name, car):
 
 def tg_answer_callback(callback_id, text):
     try:
-        requests.post(f"{TG_API}/answerCallbackQuery", data={
-            "callback_query_id": callback_id,
-            "text": text
-        }, timeout=5)
+        requests.post(f"{TG_API}/answerCallbackQuery",
+                      data={"callback_query_id": callback_id, "text": text}, timeout=5)
     except:
         pass
 
 # ==================== ДАННЫЕ В ПАМЯТИ ====================
-drivers        = {}
-order_counter  = 1000
-pending_orders = {}
+drivers       = {}
+order_counter = 1000
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def get_tariffs_db():
@@ -229,6 +210,27 @@ def get_driver_list_db():
     except:
         return []
 
+def create_order_internal(car_number, from_addr, to_addr, price, client="Админ", distance="—"):
+    global order_counter
+    order_counter += 1
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        # ✅ Сначала отменяем старые pending заказы для этого водителя
+        c.execute("UPDATE orders SET status = 'cancelled' WHERE car_number = %s AND status = 'pending'",
+                  (car_number,))
+        c.execute('''INSERT INTO orders
+                     (order_num, car_number, from_address, to_address, distance, price, client, status, created_at)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s) RETURNING id''',
+                  (order_counter, car_number, from_addr, to_addr, distance, price, client, time.time()))
+        order_id = c.fetchone()["id"]
+        conn.commit()
+        conn.close()
+        return order_id
+    except Exception as e:
+        print(f"create_order error: {e}")
+        return None
+
 # ==================== TELEGRAM POLLING ====================
 tg_offset = 0
 
@@ -237,10 +239,8 @@ def tg_polling():
     print("🤖 Telegram бот запущен")
     while True:
         try:
-            resp = requests.get(f"{TG_API}/getUpdates", params={
-                "offset": tg_offset,
-                "timeout": 30
-            }, timeout=35)
+            resp = requests.get(f"{TG_API}/getUpdates",
+                                params={"offset": tg_offset, "timeout": 30}, timeout=35)
             updates = resp.json().get("result", [])
 
             for upd in updates:
@@ -251,7 +251,6 @@ def tg_polling():
                     cq_id = cq["id"]
                     data  = cq.get("data", "")
 
-                    # ✅ Одобрить регистрацию
                     if data.startswith("approve:"):
                         pin_id = data.split(":", 1)[1]
                         try:
@@ -277,7 +276,6 @@ def tg_polling():
                         except Exception as e:
                             print(f"approve error: {e}")
 
-                    # ✅ Отклонить регистрацию
                     elif data.startswith("reject:"):
                         pin_id = data.split(":", 1)[1]
                         try:
@@ -294,7 +292,6 @@ def tg_polling():
                         except Exception as e:
                             print(f"reject error: {e}")
 
-                    # ✅ Одобрить пополнение баланса
                     elif data.startswith("bal_approve:"):
                         req_id = int(data.split(":", 1)[1])
                         try:
@@ -305,20 +302,18 @@ def tg_polling():
                             if req and req["status"] == "pending":
                                 car    = req["car_number"]
                                 amount = req["amount"]
-                                old_b  = get_balance(car)
-                                new_b  = old_b + amount
+                                new_b  = get_balance(car) + amount
                                 set_balance(car, new_b)
                                 if car in drivers:
                                     drivers[car]["balance"] = new_b
                                 c.execute("UPDATE balance_requests SET status = 'approved' WHERE id = %s", (req_id,))
                                 conn.commit()
                                 tg_answer_callback(cq_id, "✅ Баланс пополнен!")
-                                tg_send(f"✅ Баланс <b>{car}</b> пополнен на {amount:,} сум\nНовый баланс: {new_b:,} сум")
+                                tg_send(f"✅ Баланс <b>{car}</b> пополнен!\nНовый баланс: {new_b:,} сум")
                             conn.close()
                         except Exception as e:
                             print(f"bal_approve error: {e}")
 
-                    # ✅ Отклонить пополнение баланса
                     elif data.startswith("bal_reject:"):
                         req_id = int(data.split(":", 1)[1])
                         try:
@@ -328,7 +323,6 @@ def tg_polling():
                             conn.commit()
                             conn.close()
                             tg_answer_callback(cq_id, "❌ Отклонено")
-                            tg_send(f"❌ Заявка на пополнение баланса отклонена")
                         except Exception as e:
                             print(f"bal_reject error: {e}")
 
@@ -338,17 +332,27 @@ def tg_polling():
 
                     if text == "/start":
                         tg_send(
-                            "🚕 <b>TAXI 1229 Samarkand</b>\n\n"
+                            "🚕 <b>TAXI 3042 Xazarasp</b>\n\n"
                             "Доступные команды:\n"
                             "/status — статус системы\n"
+                            "/drivers — водители онлайн\n"
                             "/pending — заявки на ПИН\n"
-                            "/drivers — все водители\n"
                             "/order НОМЕР Откуда;Куда;Цена\n\n"
                             "Пример:\n"
-                            "<code>/order 90T785OA Регистон;Аэропорт;28500</code>"
+                            "<code>/order 90T785OA Bozor;Aeroport;25000</code>"
                         )
 
                     elif text == "/status":
+                        # ✅ Исправлено - берём из БД тоже
+                        try:
+                            conn = get_db()
+                            c = conn.cursor()
+                            c.execute("SELECT COUNT(*) as cnt FROM driver_list")
+                            total_reg = c.fetchone()["cnt"]
+                            conn.close()
+                        except:
+                            total_reg = 0
+
                         online = sum(1 for d in drivers.values() if d.get("status") == "free")
                         busy   = sum(1 for d in drivers.values() if d.get("status") == "busy")
                         total  = len(drivers)
@@ -358,7 +362,8 @@ def tg_polling():
                             f"📊 <b>Статус системы</b>\n\n"
                             f"🟢 Свободны: {online}\n"
                             f"🔴 На заказе: {busy}\n"
-                            f"📍 Всего онлайн: {total}\n"
+                            f"📍 Сейчас онлайн: {total}\n"
+                            f"👥 Всего водителей: {total_reg}\n"
                             f"⏳ Ждут ПИН: {pend}"
                         )
 
@@ -368,9 +373,24 @@ def tg_polling():
                         else:
                             lines = []
                             for d in drivers.values():
-                                status = "🟢" if d.get("status") == "free" else "🔴"
-                                lines.append(f"{status} {d['car_number']} — {d.get('driver_name','—')}")
+                                icon = "🟢" if d.get("status") == "free" else "🔴"
+                                lines.append(f"{icon} {d['car_number']} — {d.get('driver_name', '—')}")
                             tg_send("🚗 <b>Водители онлайн:</b>\n" + "\n".join(lines))
+
+                    elif text == "/pending":
+                        codes = get_pending_codes_db()
+                        plist = [p for p in codes if p.get("status") == "pending"]
+                        if not plist:
+                            tg_send("✅ Нет новых заявок")
+                        else:
+                            for p in plist:
+                                tg_send(
+                                    f"⏳ <b>Заявка</b>\n"
+                                    f"👤 {p['name']}\n"
+                                    f"🚗 {p['car_number']}\n"
+                                    f"📱 {p['phone']}\n"
+                                    f"🔐 ПИН: <b>{p['pin']}</b>"
+                                )
 
                     elif text.startswith("/order "):
                         try:
@@ -380,7 +400,6 @@ def tg_polling():
                             from_addr = info[0].strip()
                             to_addr   = info[1].strip()
                             price     = int(info[2].strip())
-                            # Создаём заказ
                             create_order_internal(car, from_addr, to_addr, price, "Telegram")
                             tg_send(f"✅ Заказ создан для {car}\n{from_addr} → {to_addr}\n💰 {price:,} сум")
                         except Exception as e:
@@ -392,31 +411,12 @@ def tg_polling():
 
 threading.Thread(target=tg_polling, daemon=True).start()
 
-# ==================== СОЗДАНИЕ ЗАКАЗА ====================
-def create_order_internal(car_number, from_addr, to_addr, price, client="Админ", distance="—"):
-    global order_counter
-    order_counter += 1
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''INSERT INTO orders (order_num, car_number, from_address, to_address, distance, price, client, status, created_at)
-                     VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s) RETURNING id''',
-                  (order_counter, car_number, from_addr, to_addr, distance, price, client, time.time()))
-        order_id = c.fetchone()["id"]
-        conn.commit()
-        conn.close()
-        pending_orders[car_number] = order_id
-        return order_id
-    except Exception as e:
-        print(f"create_order error: {e}")
-        return None
-
 # ==================== АДМИН HTML ====================
 ADMIN_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Taxi 1229 Admin</title>
+    <title>Taxi 3042 Admin</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
@@ -442,6 +442,7 @@ ADMIN_HTML = """
         .btn-reject { background: #1a1a1a; color: #666; border: 1px solid #333; }
         .btn-danger { background: #2a0000; color: #FF5252; border: 1px solid #4a0000; }
         .btn-order { background: #003366; color: #fff; border: 1px solid #0055aa; }
+        .btn-chat { background: #1a3a1a; color: #4CAF50; border: 1px solid #2a5a2a; }
         .status-pending { color: #FF9800; font-weight: bold; }
         .status-approved { color: #4CAF50; font-weight: bold; }
         .no-data { text-align: center; padding: 30px; color: #444; }
@@ -449,19 +450,29 @@ ADMIN_HTML = """
         .order-form { background: #1a1a1a; padding: 20px; border-radius: 10px; margin-bottom: 16px; }
         .order-form input, .order-form select {
             background: #111; color: #fff; border: 1px solid #333;
-            padding: 8px 12px; border-radius: 6px; margin: 4px; width: 200px; font-size: 13px;
+            padding: 8px 12px; border-radius: 6px; margin: 4px; font-size: 13px;
         }
-        .order-form button { padding: 8px 20px; background: #FFD600; color: #000; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin: 4px; }
-        .tariff-box { display: flex; gap: 20px; flex-wrap: wrap; }
+        .order-form button {
+            padding: 8px 20px; background: #FFD600; color: #000;
+            border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin: 4px;
+        }
+        .tariff-box { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 16px; }
         .tariff-item { background: #1a1a1a; padding: 16px; border-radius: 10px; text-align: center; min-width: 150px; }
         .tariff-item .val { font-size: 24px; font-weight: bold; color: #FFD600; }
-        .tariff-item .name { color: #555; font-size: 12px; margin-top: 4px; }
+        .tariff-item .lbl { color: #555; font-size: 12px; margin-top: 4px; }
+        .chat-box { background: #0a0a0a; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+        .chat-msg { padding: 8px 12px; margin: 4px 0; border-radius: 8px; max-width: 70%; }
+        .chat-msg.own { background: #FFD600; color: #000; margin-left: auto; }
+        .chat-msg.other { background: #1a1a1a; color: #fff; }
+        .chat-input { display: flex; gap: 8px; margin-top: 12px; }
+        .chat-input input { flex: 1; background: #111; color: #fff; border: 1px solid #333; padding: 8px 12px; border-radius: 6px; }
+        .chat-input button { padding: 8px 16px; background: #FFD600; color: #000; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🚕 TAXI 1229 SAMARKAND</h1>
-        <p>{{ current_time }}</p>
+        <h1>🚕 TAXI 3042 XAZARASP</h1>
+        <p id="clock">{{ current_time }}</p>
         <div class="tg-badge">🤖 Telegram бот активен</div>
     </div>
 
@@ -470,25 +481,25 @@ ADMIN_HTML = """
         <div class="stat-card"><div class="number">{{ free_drivers }}</div><div class="label">Свободны</div></div>
         <div class="stat-card"><div class="number">{{ busy_drivers }}</div><div class="label">На заказе</div></div>
         <div class="stat-card"><div class="number">{{ pending_count }}</div><div class="label">Ждут ПИН</div></div>
-        <div class="stat-card"><div class="number">{{ registered_count }}</div><div class="label">Водителей</div></div>
+        <div class="stat-card"><div class="number">{{ registered_count }}</div><div class="label">Всего</div></div>
     </div>
 
     <!-- Создать заказ -->
     <div class="section">
         <h2>📦 Создать заказ</h2>
         <div class="order-form">
-            <select id="orderCar">
+            <select id="orderCar" style="width:220px;">
                 <option value="">-- Выбрать водителя --</option>
-                <option value="ALL">📢 Всем водителям</option>
+                <option value="ALL">📢 Всем свободным водителям</option>
                 {% for did, d in drivers_list %}
                 <option value="{{ d.car_number }}">{{ d.car_number }} — {{ d.driver_name or '—' }}</option>
                 {% endfor %}
             </select>
-            <input type="text" id="orderFrom" placeholder="Откуда">
-            <input type="text" id="orderTo" placeholder="Куда">
-            <input type="number" id="orderPrice" placeholder="Цена (сум)">
-            <input type="text" id="orderClient" placeholder="Клиент">
-            <button onclick="createOrder()">🚀 Отправить заказ</button>
+            <input type="text" id="orderFrom" placeholder="Откуда" style="width:180px;">
+            <input type="text" id="orderTo" placeholder="Куда" style="width:180px;">
+            <input type="number" id="orderPrice" placeholder="Цена (сум)" style="width:140px;">
+            <input type="text" id="orderClient" placeholder="Клиент" style="width:140px;">
+            <button onclick="createOrder()">🚀 Отправить</button>
         </div>
     </div>
 
@@ -496,37 +507,26 @@ ADMIN_HTML = """
     <div class="section">
         <h2>💰 Тарифы</h2>
         <div class="tariff-box">
-            <div class="tariff-item">
-                <div class="val">{{ tariffs.base_fare }}</div>
-                <div class="name">Посадка (сум)</div>
-            </div>
-            <div class="tariff-item">
-                <div class="val">{{ tariffs.city_rate }}</div>
-                <div class="name">Город (сум/км)</div>
-            </div>
-            <div class="tariff-item">
-                <div class="val">{{ tariffs.suburb_rate }}</div>
-                <div class="name">Загород (сум/км)</div>
-            </div>
-            <div class="tariff-item">
-                <div class="val">{{ tariffs.wait_rate }}</div>
-                <div class="name">Ожидание (сум/мин)</div>
-            </div>
+            <div class="tariff-item"><div class="val">{{ tariffs.base_fare }}</div><div class="lbl">Посадка (сум)</div></div>
+            <div class="tariff-item"><div class="val">{{ tariffs.city_rate }}</div><div class="lbl">Город (сум/км)</div></div>
+            <div class="tariff-item"><div class="val">{{ tariffs.suburb_rate }}</div><div class="lbl">Загород (сум/км)</div></div>
+            <div class="tariff-item"><div class="val">{{ tariffs.wait_rate }}</div><div class="lbl">Ожидание (сум/мин)</div></div>
         </div>
-        <div style="margin-top:12px;">
+        <div>
             <input type="number" id="tBase" placeholder="Посадка" style="background:#111;color:#fff;border:1px solid #333;padding:6px;border-radius:6px;margin:4px;width:120px;">
             <input type="number" id="tCity" placeholder="Город" style="background:#111;color:#fff;border:1px solid #333;padding:6px;border-radius:6px;margin:4px;width:120px;">
             <input type="number" id="tSuburb" placeholder="Загород" style="background:#111;color:#fff;border:1px solid #333;padding:6px;border-radius:6px;margin:4px;width:120px;">
             <input type="number" id="tWait" placeholder="Ожидание" style="background:#111;color:#fff;border:1px solid #333;padding:6px;border-radius:6px;margin:4px;width:120px;">
-            <button onclick="saveTariffs()" style="padding:6px 16px;background:#FFD600;color:#000;border:none;border-radius:6px;font-weight:bold;cursor:pointer;">Сохранить тарифы</button>
+            <button onclick="saveTariffs()" style="padding:6px 16px;background:#FFD600;color:#000;border:none;border-radius:6px;font-weight:bold;cursor:pointer;margin:4px;">💾 Сохранить</button>
         </div>
     </div>
 
+    <!-- Заявки на ПИН -->
     {% if pending_list %}
     <div class="section">
         <h2>🔑 Заявки на регистрацию</h2>
         <table>
-            <tr><th>Имя</th><th>��елефон</th><th>Авто</th><th>ПИН-код</th><th>Статус</th><th>Действия</th></tr>
+            <tr><th>Имя</th><th>Телефон</th><th>Авто</th><th>ПИН-код</th><th>Статус</th><th>Действия</th></tr>
             {% for p in pending_list %}
             <tr>
                 <td>{{ p.name }}</td>
@@ -536,7 +536,7 @@ ADMIN_HTML = """
                 <td>
                     {% if p.status == 'pending' %}<span class="status-pending">⏳ Ожидает</span>
                     {% elif p.status == 'approved' %}<span class="status-approved">✅ Одобрен</span>
-                    {% else %}<span style="color:#555">{{ p.status }}</span>{% endif %}
+                    {% else %}<span style="color:#555">❌ {{ p.status }}</span>{% endif %}
                 </td>
                 <td>
                     {% if p.status == 'pending' %}
@@ -550,7 +550,7 @@ ADMIN_HTML = """
     </div>
     {% endif %}
 
-    <!-- Заявки на пополнение баланса -->
+    <!-- Заявки на баланс -->
     {% if balance_requests %}
     <div class="section">
         <h2>💰 Заявки на пополнение баланса</h2>
@@ -577,6 +577,7 @@ ADMIN_HTML = """
     </div>
     {% endif %}
 
+    <!-- Активные водители -->
     <div class="section">
         <h2>🚗 Активные водители</h2>
         {% if drivers_list %}
@@ -597,7 +598,9 @@ ADMIN_HTML = """
                 <td style="color:#444">{{ d.time_str }}</td>
                 <td>
                     <button class="btn btn-order" onclick="quickOrder('{{ d.car_number }}')">📦 Заказ</button>
-                    <button class="btn btn-danger" onclick="removeDriver('{{ did }}')">🗑 Удалить</button>
+                    <button class="btn btn-chat" onclick="openChat('{{ d.car_number }}')">💬 Чат</button>
+                    <button class="btn btn-approve" onclick="addBalance('{{ d.car_number }}')">💰 Баланс</button>
+                    <button class="btn btn-danger" onclick="removeDriver('{{ did }}')">🗑</button>
                 </td>
             </tr>
             {% endfor %}
@@ -607,6 +610,24 @@ ADMIN_HTML = """
         {% endif %}
     </div>
 
+    <!-- Чат -->
+    <div class="section" id="chatSection" style="display:none;">
+        <h2>💬 Чат с водителем: <span id="chatCarNumber"></span></h2>
+        <div class="chat-box" id="chatMessages" style="height:300px;overflow-y:auto;"></div>
+        <div class="chat-input">
+            <input type="text" id="chatText" placeholder="Введите сообщение..." onkeypress="if(event.key==='Enter')sendChat()">
+            <button onclick="sendChat()">Отправить</button>
+        </div>
+        <div style="margin-top:8px;">
+            <button onclick="sendQuick('П��инято ✅')" class="btn btn-approve">Принято</button>
+            <button onclick="sendQuick('Подождите ⏳')" class="btn btn-reject">Подождите</button>
+            <button onclick="sendQuick('Есть заказ 📦')" class="btn btn-order">Есть заказ</button>
+            <button onclick="sendQuick('Вы свободны 🟢')" class="btn btn-chat">Свободны</button>
+            <button onclick="closeChat()" class="btn btn-danger">Закрыть</button>
+        </div>
+    </div>
+
+    <!-- Все водители -->
     {% if all_drivers_list %}
     <div class="section">
         <h2>📋 Все зарегистрированные водители</h2>
@@ -634,6 +655,105 @@ ADMIN_HTML = """
     <script>
         setTimeout(() => location.reload(), 3000);
 
+        let currentCar = '';
+        let chatLoaded = new Set();
+        let chatInterval = null;
+
+        function openChat(car) {
+            currentCar = car;
+            document.getElementById('chatSection').style.display = 'block';
+            document.getElementById('chatCarNumber').textContent = car;
+            document.getElementById('chatMessages').innerHTML = '';
+            chatLoaded.clear();
+            loadChat();
+            // ✅ Обновляем чат кажд��е 2 секунды
+            if (chatInterval) clearInterval(chatInterval);
+            chatInterval = setInterval(loadChat, 2000);
+            document.getElementById('chatSection').scrollIntoView({behavior: 'smooth'});
+        }
+
+        function closeChat() {
+            document.getElementById('chatSection').style.display = 'none';
+            currentCar = '';
+            if (chatInterval) clearInterval(chatInterval);
+        }
+
+        function loadChat() {
+            if (!currentCar) return;
+            fetch('/api/chat/messages?car=' + currentCar)
+                .then(r => r.json())
+                .then(msgs => {
+                    const box = document.getElementById('chatMessages');
+                    msgs.forEach(m => {
+                        if (chatLoaded.has(m.id)) return;
+                        chatLoaded.add(m.id);
+                        const div = document.createElement('div');
+                        // ✅ dispatcher = справа (own), driver = слева (other)
+                        div.className = 'chat-msg ' + (m.from === 'dispatcher' ? 'own' : 'other');
+                        div.innerHTML = `<b>${m.from === 'dispatcher' ? 'Диспетчер' : m.car_number}</b>: ${m.text} <small style="opacity:0.5">${m.time}</small>`;
+                        box.appendChild(div);
+                    });
+                    box.scrollTop = box.scrollHeight;
+                });
+        }
+
+        function sendChat() {
+            const text = document.getElementById('chatText').value.trim();
+            if (!text || !currentCar) return;
+            document.getElementById('chatText').value = '';
+            fetch('/api/chat/dispatch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({car_number: currentCar, text: text})
+            }).then(() => loadChat());
+        }
+
+        function sendQuick(text) {
+            if (!currentCar) { alert('Сначала откройте чат с водителем!'); return; }
+            fetch('/api/chat/dispatch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({car_number: currentCar, text: text})
+            }).then(() => loadChat());
+        }
+
+        function createOrder() {
+            const car    = document.getElementById('orderCar').value;
+            const from   = document.getElementById('orderFrom').value.trim();
+            const to     = document.getElementById('orderTo').value.trim();
+            const price  = document.getElementById('orderPrice').value;
+            const client = document.getElementById('orderClient').value || 'Клиент';
+            if (!from || !to || !price) { alert('Заполните все поля!'); return; }
+            const url = car === 'ALL' ? '/api/orders/broadcast' : '/api/orders/create';
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({car_number: car, from_address: from, to_address: to, price: parseInt(price), client: client})
+            }).then(r => r.json()).then(d => {
+                alert(d.success ? '✅ Заказ отправлен!' : '❌ Ошибка: ' + (d.error || ''));
+                location.reload();
+            });
+        }
+
+        function quickOrder(car) {
+            document.getElementById('orderCar').value = car;
+            document.getElementById('orderFrom').focus();
+            document.querySelector('.section').scrollIntoView({behavior: 'smooth'});
+        }
+
+        function saveTariffs() {
+            const base   = document.getElementById('tBase').value;
+            const city   = document.getElementById('tCity').value;
+            const suburb = document.getElementById('tSuburb').value;
+            const wait   = document.getElementById('tWait').value;
+            if (!base || !city || !suburb || !wait) { alert('Заполните все тарифы!'); return; }
+            fetch('/api/tariffs', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({base_fare: parseInt(base), city_rate: parseInt(city), suburb_rate: parseInt(suburb), wait_rate: parseInt(wait)})
+            }).then(() => { alert('✅ Тарифы сохранены!'); location.reload(); });
+        }
+
         function approveCode(pinId) {
             if (!confirm('Одобрить заявку?')) return;
             fetch('/api/admin/approve_code', {
@@ -647,7 +767,7 @@ ADMIN_HTML = """
         }
 
         function rejectCode(pinId) {
-            if (!confirm('Отклонить заявку?')) return;
+            if (!confirm('Отклон��ть?')) return;
             fetch('/api/admin/reject_code', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -655,39 +775,21 @@ ADMIN_HTML = """
             }).then(() => location.reload());
         }
 
-        function removeDriver(did) {
-            if (!confirm('Удалить водителя из онлайн?')) return;
-            fetch('/remove_driver', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({driver: did})
-            }).then(() => location.reload());
-        }
-
-        function deleteDriver(car) {
-            if (!confirm('Полностью удалить водителя ' + car + '?')) return;
-            fetch('/api/admin/delete_driver', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({car_number: car})
-            }).then(() => location.reload());
-        }
-
         function addBalance(car) {
             const amount = prompt('Введите сумму пополнения для ' + car + ':');
-            if (!amount || isNaN(amount)) return;
+            if (!amount || isNaN(amount) || parseInt(amount) <= 0) return;
             fetch('/api/admin/add_balance', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({car_number: car, amount: parseInt(amount)})
             }).then(r => r.json()).then(d => {
-                alert(d.success ? '✅ Баланс пополнен!' : '❌ Ошибка');
+                alert(d.success ? '✅ Баланс пополнен! Новый: ' + d.new_balance.toLocaleString() + ' сум' : '❌ Ошибка');
                 location.reload();
             });
         }
 
         function approveBalance(id) {
-            if (!confirm('Одобрить пополнение баланса?')) return;
+            if (!confirm('Одобрить пополнение?')) return;
             fetch('/api/admin/approve_balance', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -696,7 +798,7 @@ ADMIN_HTML = """
         }
 
         function rejectBalance(id) {
-            if (!confirm('Отклонить пополнение баланса?')) return;
+            if (!confirm('Отклонить?')) return;
             fetch('/api/admin/reject_balance', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -704,47 +806,22 @@ ADMIN_HTML = """
             }).then(() => location.reload());
         }
 
-        function createOrder() {
-            const car    = document.getElementById('orderCar').value;
-            const from   = document.getElementById('orderFrom').value;
-            const to     = document.getElementById('orderTo').value;
-            const price  = document.getElementById('orderPrice').value;
-            const client = document.getElementById('orderClient').value || 'Админ';
-            if (!from || !to || !price) { alert('Заполните все поля!'); return; }
-
-            const url = car === 'ALL' ? '/api/orders/broadcast' : '/api/orders/create';
-            fetch(url, {
+        function removeDriver(did) {
+            if (!confirm('Убрать из онлайн?')) return;
+            fetch('/remove_driver', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    car_number: car, from_address: from,
-                    to_address: to, price: parseInt(price), client: client
-                })
-            }).then(r => r.json()).then(d => {
-                alert(d.success ? '✅ Заказ отправлен!' : '❌ Ошибка');
-                location.reload();
-            });
+                body: JSON.stringify({driver: did})
+            }).then(() => location.reload());
         }
 
-        function quickOrder(car) {
-            document.getElementById('orderCar').value = car;
-            document.getElementById('orderFrom').focus();
-        }
-
-        function saveTariffs() {
-            const base   = document.getElementById('tBase').value;
-            const city   = document.getElementById('tCity').value;
-            const suburb = document.getElementById('tSuburb').value;
-            const wait   = document.getElementById('tWait').value;
-            if (!base || !city || !suburb || !wait) { alert('Заполните все тарифы!'); return; }
-            fetch('/api/tariffs', {
+        function deleteDriver(car) {
+            if (!confirm('Полностью удалить ' + car + '?')) return;
+            fetch('/api/admin/delete_driver', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    base_fare: parseInt(base), city_rate: parseInt(city),
-                    suburb_rate: parseInt(suburb), wait_rate: parseInt(wait)
-                })
-            }).then(() => { alert('✅ Тарифы сохранены!'); location.reload(); });
+                body: JSON.stringify({car_number: car})
+            }).then(() => location.reload());
         }
     </script>
 </body>
@@ -754,31 +831,36 @@ ADMIN_HTML = """
 # ==================== КАРТА ====================
 @app.route('/map')
 def map_page():
-    api_key  = "AIzaSyDbbgIqjyOqzS7gozVqmZ_V4G1T6cpKXC0"
+    api_key = "AIzaSyDbbgIqjyOqzS7gozVqmZ_V4G1T6cpKXC0"
     map_html = f"""
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Карта водителей</title>
+    <title>Карта водителей — TAXI 3042</title>
     <style>
         * {{ margin:0; padding:0; box-sizing:border-box; }}
         body {{ background:#111; }}
         #map {{ width:100vw; height:100vh; }}
+        #info {{ position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.8);
+                 color:#FFD600; padding:10px 16px; border-radius:10px; font-size:13px; z-index:100; }}
     </style>
 </head>
 <body>
     <div id="map"></div>
+    <div id="info">🚗 Водителей онлайн: <b id="count">0</b></div>
     <script>
         let map, markers = {{}}, infoWindows = {{}};
+        let firstLoad = true;
 
         function initMap() {{
             map = new google.maps.Map(document.getElementById("map"), {{
-                center: {{ lat: 39.6542, lng: 66.9597 }},
-                zoom: 13,
+                center: {{ lat: 41.3069, lng: 61.0838 }},
+                zoom: 12,
                 styles: [
                     {{ elementType: "geometry", stylers: [{{ color: "#1a1a2e" }}] }},
+                    {{ elementType: "labels.text.fill", stylers: [{{ color: "#8ec3b9" }}] }},
                     {{ featureType: "road", elementType: "geometry", stylers: [{{ color: "#304a7d" }}] }},
                     {{ featureType: "water", elementType: "geometry", stylers: [{{ color: "#0e1626" }}] }}
                 ]
@@ -791,46 +873,92 @@ def map_page():
             fetch("/api/drivers")
                 .then(r => r.json())
                 .then(data => {{
+                    document.getElementById('count').textContent = Object.keys(data).length;
+                    let bounds = new google.maps.LatLngBounds();
+                    let hasDrivers = false;
+
                     Object.keys(markers).forEach(key => {{
-                        if (!data[key]) {{ markers[key].setMap(null); delete markers[key]; }}
+                        if (!data[key]) {{
+                            markers[key].setMap(null);
+                            delete markers[key];
+                            if (infoWindows[key]) {{
+                                infoWindows[key].close();
+                                delete infoWindows[key];
+                            }}
+                        }}
                     }});
+
                     for (let key in data) {{
                         let d   = data[key];
-                        let pos = {{ lat: parseFloat(d.lat), lng: parseFloat(d.lng) }};
+                        let lat = parseFloat(d.lat);
+                        let lng = parseFloat(d.lng);
+                        if (isNaN(lat) || isNaN(lng)) continue;
+                        let pos = {{ lat: lat, lng: lng }};
+                        bounds.extend(pos);
+                        hasDrivers = true;
+
                         if (markers[key]) {{
                             markers[key].setPosition(pos);
+                            markers[key].setIcon({{
+                                url: d.status === "free"
+                                    ? "https://maps.google.com/mapfiles/ms/icons/green-dot.png"
+                                    : "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
+                                scaledSize: new google.maps.Size(40, 40)
+                            }});
                         }} else {{
                             markers[key] = new google.maps.Marker({{
-                                position: pos, map: map, title: d.car_number,
+                                position: pos,
+                                map: map,
+                                title: d.car_number,
                                 icon: {{
                                     url: d.status === "free"
                                         ? "https://maps.google.com/mapfiles/ms/icons/green-dot.png"
                                         : "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
                                     scaledSize: new google.maps.Size(40, 40)
                                 }},
-                                label: {{ text: d.car_number, color: "#FFD600", fontSize: "11px", fontWeight: "bold" }}
+                                label: {{
+                                    text: d.car_number,
+                                    color: "#FFD600",
+                                    fontSize: "11px",
+                                    fontWeight: "bold"
+                                }}
                             }});
+
                             markers[key].addListener("click", () => {{
                                 Object.values(infoWindows).forEach(w => w.close());
                                 infoWindows[key] = new google.maps.InfoWindow({{
-                                    content: `<div style="background:#1a1a1a;color:#fff;padding:12px;border-radius:10px;min-width:200px;">
-                                        <b style="color:#FFD600;">🚗 ${{d.car_number}}</b><br>
-                                        👤 ${{d.driver_name || '—'}}<br>
-                                        📱 ${{d.phone || '—'}}<br>
-                                        📍 <b style="color:${{d.status==='free'?'#4CAF50':'#FF5252'}}">
-                                            ${{d.status==='free'?'Свободен':'На заказе'}}</b><br>
-                                        ⚡ ${{d.speed}} км/ч<br>
-                                        💰 ${{parseInt(d.balance||0).toLocaleString()}} сум
-                                    </div>`
+                                    content: `
+                                        <div style="background:#1a1a1a;color:#fff;padding:12px;border-radius:10px;min-width:200px;">
+                                            <b style="color:#FFD600;font-size:15px;">🚗 ${{d.car_number}}</b><br><br>
+                                            👤 ${{d.driver_name || '—'}}<br>
+                                            📱 ${{d.phone || '—'}}<br>
+                                            📍 <b style="color:${{d.status==='free'?'#4CAF50':'#FF5252'}}">
+                                                ${{d.status==='free'?'🟢 Свободен':'🔴 На заказе'}}
+                                            </b><br>
+                                            ⚡ ${{d.speed}} км/ч<br>
+                                            💰 ${{parseInt(d.balance||0).toLocaleString()}} сум<br>
+                                            <small style="color:#555;">🕐 ${{d.time_str}}</small>
+                                        </div>`
                                 }});
                                 infoWindows[key].open(map, markers[key]);
                             }});
                         }}
                     }}
-                }});
+
+                    if (hasDrivers && firstLoad) {{
+                        firstLoad = false;
+                        map.fitBounds(bounds);
+                        if (Object.keys(data).length === 1) {{
+                            map.setZoom(14);
+                        }}
+                    }}
+                }})
+                .catch(err => console.log("Ошибка:", err));
         }}
     </script>
-    <script async defer src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initMap"></script>
+    <script async defer
+        src="https://maps.googleapis.com/maps/api/js?key={api_key}&callback=initMap">
+    </script>
 </body>
 </html>
 """
@@ -847,7 +975,6 @@ def index():
     all_drivers   = get_driver_list_db()
     tariffs       = get_tariffs_db()
 
-    # Заявки на пополнение баланса
     try:
         conn = get_db()
         c = conn.cursor()
@@ -986,7 +1113,6 @@ def delete_driver():
         return jsonify({"success": False, "error": str(e)})
 
 
-# ✅ Пополнение баланса через админа
 @app.route('/api/admin/add_balance', methods=['POST'])
 def admin_add_balance():
     data   = request.json
@@ -1003,7 +1129,6 @@ def admin_add_balance():
     return jsonify({"success": True, "new_balance": new_b})
 
 
-# ✅ Водитель запрашивает пополнение баланса
 @app.route('/api/balance/request', methods=['POST'])
 def request_balance():
     data   = request.json
@@ -1038,14 +1163,13 @@ def approve_balance():
         if req and req["status"] == "pending":
             car    = req["car_number"]
             amount = req["amount"]
-            old_b  = get_balance(car)
-            new_b  = old_b + amount
+            new_b  = get_balance(car) + amount
             set_balance(car, new_b)
             if car in drivers:
                 drivers[car]["balance"] = new_b
             c.execute("UPDATE balance_requests SET status = 'approved' WHERE id = %s", (req_id,))
             conn.commit()
-            tg_send(f"✅ Баланс {car} пополнен на {amount:,} сум\nНовый баланс: {new_b:,} сум")
+            tg_send(f"✅ Баланс {car} пополнен на {amount:,} сум\nНовый: {new_b:,} сум")
         conn.close()
         return jsonify({"success": True})
     except Exception as e:
@@ -1079,12 +1203,8 @@ def driver_login():
         conn.close()
         if driver:
             balance = get_balance(driver["car_number"])
-            return jsonify({
-                "success":   True,
-                "driver_id": driver["id"],
-                "name":      driver["name"],
-                "balance":   balance
-            })
+            return jsonify({"success": True, "driver_id": driver["id"],
+                            "name": driver["name"], "balance": balance})
     except Exception as e:
         print(f"login error: {e}")
 
@@ -1103,12 +1223,8 @@ def driver_login():
             conn.close()
             set_balance(info["car_number"], 50000)
             tg_notify_approved(info["name"], info["car_number"], info["pin"])
-            return jsonify({
-                "success":   True,
-                "driver_id": info["car_number"],
-                "name":      info["name"],
-                "balance":   50000
-            })
+            return jsonify({"success": True, "driver_id": info["car_number"],
+                            "name": info["name"], "balance": 50000})
         conn.close()
     except Exception as e:
         print(f"login pending error: {e}")
@@ -1119,9 +1235,7 @@ def driver_login():
 @app.route('/api/driver/<driver_id>/balance', methods=['GET'])
 def get_driver_balance(driver_id):
     balance = get_balance(driver_id)
-    name    = ""
-    if driver_id in drivers:
-        name = drivers[driver_id].get("driver_name", "")
+    name    = drivers.get(driver_id, {}).get("driver_name", "")
     return jsonify({"balance": balance, "name": name})
 
 
@@ -1136,20 +1250,13 @@ def update_tariffs():
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute('''UPDATE tariffs SET
-                     base_fare = %s, city_rate = %s,
-                     suburb_rate = %s, wait_rate = %s
-                     WHERE id = 1''',
-                  (int(data.get('base_fare', 5000)),
-                   int(data.get('city_rate', 2800)),
-                   int(data.get('suburb_rate', 3000)),
-                   int(data.get('wait_rate', 500))))
+        c.execute('''UPDATE tariffs SET base_fare=%s, city_rate=%s, suburb_rate=%s, wait_rate=%s WHERE id=1''',
+                  (int(data.get('base_fare', 5000)), int(data.get('city_rate', 2800)),
+                   int(data.get('suburb_rate', 3000)), int(data.get('wait_rate', 500))))
         conn.commit()
         conn.close()
-        tg_send(f"💰 Тарифы обновлены:\n"
-                f"Посадка: {data.get('base_fare')} сум\n"
-                f"Город: {data.get('city_rate')} сум/км\n"
-                f"Загород: {data.get('suburb_rate')} сум/км\n"
+        tg_send(f"💰 Тарифы обновлены:\nПосадка: {data.get('base_fare')} сум\n"
+                f"Город: {data.get('city_rate')} сум/км\nЗагород: {data.get('suburb_rate')} сум/км\n"
                 f"Ожидание: {data.get('wait_rate')} сум/мин")
         return jsonify({'status': 'ok'})
     except Exception as e:
@@ -1158,9 +1265,9 @@ def update_tariffs():
 
 @app.route('/location', methods=['POST'])
 def location():
-    data      = request.get_json(force=True)
-    did       = data.get('driver', data.get('car_number', 'unknown'))
-    balance   = get_balance(did)
+    data    = request.get_json(force=True)
+    did     = data.get('driver', data.get('car_number', 'unknown'))
+    balance = get_balance(did)
     drivers[did] = {
         'lat':         data.get('lat', 0),
         'lng':         data.get('lng', 0),
@@ -1216,7 +1323,6 @@ def block_driver():
     return jsonify({'status': 'ok'})
 
 
-# ✅ Создать заказ одному водителю
 @app.route('/api/orders/create', methods=['POST'])
 def create_order():
     data      = request.json
@@ -1227,12 +1333,10 @@ def create_order():
     client    = data.get('client', 'Клиент')
     distance  = data.get('distance', '—')
     order_id  = create_order_internal(car, from_addr, to_addr, price, client, distance)
-    tg_send(f"📦 Заказ назначен водителю <b>{car}</b>\n"
-            f"📍 {from_addr} → {to_addr}\n💰 {price:,} сум")
+    tg_send(f"📦 Заказ назначен <b>{car}</b>\n📍 {from_addr} → {to_addr}\n💰 {price:,} сум")
     return jsonify({"success": True, "order_id": order_id})
 
 
-# ✅ Отправить заказ ВСЕМ водителям
 @app.route('/api/orders/broadcast', methods=['POST'])
 def broadcast_order():
     data      = request.json
@@ -1240,38 +1344,37 @@ def broadcast_order():
     to_addr   = data.get('to_address', '')
     price     = int(data.get('price', 0))
     client    = data.get('client', 'Клиент')
-
     if not drivers:
         return jsonify({"success": False, "error": "Нет водителей онлайн"})
-
     count = 0
-    for car in list(drivers.keys()):
-        if drivers[car].get('status') == 'free':
+    for car, d in list(drivers.items()):
+        if d.get('status') == 'free':
             create_order_internal(car, from_addr, to_addr, price, client)
             count += 1
-
-    tg_send(f"📢 Заказ отправлен {count} водителям!\n"
-            f"📍 {from_addr} → {to_addr}\n💰 {price:,} сум")
+    tg_send(f"📢 Заказ отправлен {count} водителям!\n📍 {from_addr} → {to_addr}\n💰 {price:,} сум")
     return jsonify({"success": True, "sent_to": count})
 
 
+# ✅ ИСПРАВЛЕНО - заказы из БД, не из памяти
 @app.route('/api/orders/pending', methods=['GET'])
 def get_pending_order():
     car = request.args.get('car', '')
-    if car not in pending_orders:
+    if not car:
         return jsonify({"has_order": False})
-    order_id = pending_orders[car]
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+        c.execute(
+            "SELECT * FROM orders WHERE car_number = %s AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+            (car,)
+        )
         order = c.fetchone()
         conn.close()
-        if not order or order["status"] != "pending":
-            del pending_orders[car]
+        if not order:
             return jsonify({"has_order": False})
         return jsonify({"has_order": True, **dict(order)})
-    except:
+    except Exception as e:
+        print(f"pending order error: {e}")
         return jsonify({"has_order": False})
 
 
@@ -1287,8 +1390,6 @@ def respond_to_order():
         c.execute("UPDATE orders SET status = %s WHERE id = %s", (response_val, order_id))
         conn.commit()
         conn.close()
-        if car in pending_orders:
-            del pending_orders[car]
         if response_val == "accepted":
             tg_send(f"✅ Водитель <b>{car}</b> принял заказ")
         else:
@@ -1311,6 +1412,7 @@ def list_orders():
         return jsonify([])
 
 
+# ✅ ИСПРАВЛЕНО - sender = 'driver' всегда
 @app.route('/api/chat/send', methods=['POST'])
 def chat_send():
     data   = request.json
@@ -1321,8 +1423,10 @@ def chat_send():
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute("INSERT INTO chat_messages (car_number, sender, text, time) VALUES (%s, %s, %s, %s)",
-                  (car, car, text, t))
+        c.execute(
+            "INSERT INTO chat_messages (car_number, sender, text, time) VALUES (%s, %s, %s, %s)",
+            (car, 'driver', text, t)  # ✅ всегда 'driver'
+        )
         conn.commit()
         conn.close()
         tg_send(f"💬 <b>{driver}</b> ({car}):\n{text}")
@@ -1337,8 +1441,10 @@ def chat_get():
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute('''SELECT * FROM chat_messages WHERE car_number = %s
-                     ORDER BY id DESC LIMIT 50''', (car,))
+        c.execute(
+            "SELECT * FROM chat_messages WHERE car_number = %s ORDER BY id DESC LIMIT 50",
+            (car,)
+        )
         rows = c.fetchall()
         conn.close()
         result = []
@@ -1364,8 +1470,10 @@ def chat_dispatch():
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute("INSERT INTO chat_messages (car_number, sender, text, time) VALUES (%s, %s, %s, %s)",
-                  (car, 'dispatcher', text, t))
+        c.execute(
+            "INSERT INTO chat_messages (car_number, sender, text, time) VALUES (%s, %s, %s, %s)",
+            (car, 'dispatcher', text, t)
+        )
         conn.commit()
         conn.close()
         return jsonify({"success": True})
@@ -1387,7 +1495,7 @@ def ping():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("🚕 TAXI SERVER STARTED")
+    print("🚕 TAXI 3042 XAZARASP — SERVER STARTED")
     print("📍 Карта: /map")
     print("🗄️  База данных: PostgreSQL")
     print("=" * 50)
