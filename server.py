@@ -766,6 +766,161 @@ def tg_polling():
 
 threading.Thread(target=tg_polling,daemon=True).start()
 
+# ==================== ОНЛАЙН СТАТУС ВОДИТЕЛЯ ====================
+
+@app.route("/api/driver/heartbeat", methods=["POST"])
+def api_heartbeat():
+    """Водитель каждые 30 сек отправляет сигнал"""
+    try:
+        data = request.json or {}
+        car  = data.get("car_number", "").strip().upper()
+        ok, err = validate_car_number(car)
+        if not ok:
+            return jsonify({"ok": False, "error": err})
+
+        with db_lock:
+            conn = get_db()
+            # Обновить время последнего онлайна
+            conn.execute(
+                """UPDATE drivers 
+                SET last_seen=?, status=CASE 
+                    WHEN status='offline' THEN 'free' 
+                    ELSE status END
+                WHERE car_number=?""",
+                (time.time(), car)
+            )
+            conn.commit()
+            
+            # Получить текущий заказ
+            order = conn.execute(
+                "SELECT * FROM orders WHERE car_number=? AND status='pending'",
+                (car,)
+            ).fetchone()
+            
+            driver = conn.execute(
+                "SELECT * FROM drivers WHERE car_number=?", (car,)
+            ).fetchone()
+            conn.close()
+
+        return jsonify({
+            "ok": True,
+            "status": driver["status"] if driver else "free",
+            "balance": driver["balance"] if driver else 0,
+            "active_order": dict(order) if order else None
+        })
+    except Exception as e:
+        logger.error(f"heartbeat error: {e}")
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/driver/go_offline", methods=["POST"])
+def api_go_offline():
+    """Водитель уходит офлайн"""
+    try:
+        data = request.json or {}
+        car  = data.get("car_number", "").strip().upper()
+        ok, err = validate_car_number(car)
+        if not ok:
+            return jsonify({"ok": False, "error": err})
+
+        with db_lock:
+            conn = get_db()
+            conn.execute(
+                "UPDATE drivers SET status='offline' WHERE car_number=?",
+                (car,)
+            )
+            conn.commit()
+            conn.close()
+
+        add_log("go_offline", car, "Водитель ушёл офлайн")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/driver/go_online", methods=["POST"])
+def api_go_online():
+    """Водитель выходит онлайн"""
+    try:
+        data = request.json or {}
+        car  = data.get("car_number", "").strip().upper()
+        pin  = data.get("pin", "").strip()
+
+        ok, err = validate_car_number(car)
+        if not ok:
+            return jsonify({"ok": False, "error": err})
+
+        conn = get_db()
+        driver = conn.execute(
+            "SELECT * FROM drivers WHERE car_number=? AND pin=?",
+            (car, pin)
+        ).fetchone()
+        conn.close()
+
+        if not driver:
+            return jsonify({"ok": False, "error": "Неверный номер или ПИН"})
+
+        with db_lock:
+            conn = get_db()
+            conn.execute(
+                "UPDATE drivers SET status='free', last_seen=? WHERE car_number=?",
+                (time.time(), car)
+            )
+            conn.commit()
+            conn.close()
+
+        add_log("go_online", car, "Водитель вышел онлайн")
+        tg_send(f"🟢 Водитель <b>{car}</b> — {driver['name']} вышел онлайн!")
+        return jsonify({
+            "ok": True,
+            "driver": {
+                "car_number": driver["car_number"],
+                "name":       driver["name"],
+                "phone":      driver["phone"],
+                "balance":    driver["balance"],
+                "status":     "free"
+            }
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/driver/order_status", methods=["POST"])
+def api_driver_order_status():
+    """Водитель получает свой текущий заказ"""
+    try:
+        data = request.json or {}
+        car  = data.get("car_number", "").strip().upper()
+        ok, err = validate_car_number(car)
+        if not ok:
+            return jsonify({"ok": False, "error": err})
+
+        conn = get_db()
+        order = conn.execute(
+            "SELECT * FROM orders WHERE car_number=? AND status='pending'",
+            (car,)
+        ).fetchone()
+        driver = conn.execute(
+            "SELECT balance, status FROM drivers WHERE car_number=?",
+            (car,)
+        ).fetchone()
+        
+        # Непрочитанные сообщения чата
+        messages = conn.execute(
+            """SELECT * FROM chat_messages 
+            WHERE car_number=? 
+            ORDER BY created_at DESC LIMIT 5""",
+            (car,)
+        ).fetchall()
+        conn.close()
+
+        return jsonify({
+            "ok":          True,
+            "active_order": dict(order) if order else None,
+            "balance":     driver["balance"] if driver else 0,
+            "status":      driver["status"] if driver else "offline",
+            "messages":    [dict(m) for m in messages]
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
 # ==================== API ====================
 @app.route("/api/stats")
 @login_required
