@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, session, redirect
+from flask import Flask, request, jsonify, render_template_string, session, redirect, Response
 from datetime import datetime
 from functools import wraps
 import random
@@ -11,7 +11,6 @@ import sqlite3
 import logging
 import re
 
-# ==================== ЛОГИРОВАНИЕ ====================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -24,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = "TAXI3042_SECRET_KEY_XAZARASP"
-
 db_lock = threading.Lock()
 DB_PATH = "taxi.db"
 
@@ -44,6 +42,7 @@ def init_db():
             status     TEXT DEFAULT 'offline',
             balance    INTEGER DEFAULT 50000,
             pin        TEXT NOT NULL,
+            last_seen  REAL DEFAULT 0,
             created_at REAL
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS orders (
@@ -133,7 +132,7 @@ def init_db():
             c.execute('''INSERT OR IGNORE INTO tariffs
                 (zone,time_type,name,base_fare,rate_per_km,wait_rate)
                 VALUES (?,?,?,?,?,?)''',
-                (zone,time_type,name,base,km,wait))
+                (zone, time_type, name, base, km, wait))
         conn.commit()
         conn.close()
         logger.info("✅ База данных готова")
@@ -142,62 +141,62 @@ init_db()
 
 # ==================== ВАЛИДАЦИЯ ====================
 def validate_car_number(car):
-    if not car or len(car)<3 or len(car)>20:
-        return False,"Неверный номер авто"
-    return True,""
+    if not car or len(car) < 3 or len(car) > 20:
+        return False, "Неверный номер авто"
+    return True, ""
 
 def validate_address(addr):
-    if not addr or len(addr.strip())<2:
-        return False,"Адрес слишком короткий"
-    if len(addr)>200:
-        return False,"Адрес слишком длинный"
-    return True,""
+    if not addr or len(addr.strip()) < 2:
+        return False, "Адрес слишком короткий"
+    if len(addr) > 200:
+        return False, "Адрес слишком длинный"
+    return True, ""
 
 def validate_price(price):
     try:
-        p=int(price)
-        if p<=0: return False,"Цена должна быть больше 0"
-        if p>10000000: return False,"Цена слишком большая"
-        return True,""
-    except: return False,"Неверный формат цены"
+        p = int(price)
+        if p <= 0: return False, "Цена должна быть больше 0"
+        if p > 10000000: return False, "Цена слишком большая"
+        return True, ""
+    except: return False, "Неверный формат цены"
 
 def validate_phone(phone):
-    phone_clean=re.sub(r'[\s\-\(\)]','',phone)
-    if not re.match(r'^\+?[\d]{9,13}$',phone_clean):
-        return False,"Неверный формат телефона"
-    return True,""
+    phone_clean = re.sub(r'[\s\-\(\)]', '', phone)
+    if not re.match(r'^\+?[\d]{9,13}$', phone_clean):
+        return False, "Неверный формат телефона"
+    return True, ""
 
 def validate_name(name):
-    if not name or len(name.strip())<2:
-        return False,"Имя слишком короткое"
-    if len(name)>100: return False,"Имя слишком длинное"
-    return True,""
+    if not name or len(name.strip()) < 2:
+        return False, "Имя слишком короткое"
+    if len(name) > 100: return False, "Имя слишком длинное"
+    return True, ""
 
 def validate_amount(amount):
     try:
-        a=int(amount)
-        if a<=0: return False,"Сумма должна быть больше 0"
-        if a>100000000: return False,"Сумма слишком большая"
-        return True,""
-    except: return False,"Неверный формат суммы"
+        a = int(amount)
+        if a <= 0: return False, "Сумма должна быть больше 0"
+        if a > 100000000: return False, "Сумма слишком большая"
+        return True, ""
+    except: return False, "Неверный формат суммы"
 
 def validate_stars(stars):
     try:
-        s=int(stars)
-        if s<1 or s>5: return False,"Оценка от 1 до 5"
-        return True,""
-    except: return False,"Неверный формат"
+        s = int(stars)
+        if s < 1 or s > 5: return False, "Оценка от 1 до 5"
+        return True, ""
+    except: return False, "Неверный формат"
 
 # ==================== АУТЕНТИФИКАЦИЯ ====================
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD","taxi3042")
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME","admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "taxi3042")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 
 def login_required(f):
     @wraps(f)
-    def decorated(*args,**kwargs):
+    def decorated(*args, **kwargs):
         if not session.get("logged_in"):
             return redirect("/login")
-        return f(*args,**kwargs)
+        return f(*args, **kwargs)
     return decorated
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -245,19 +244,19 @@ padding:10px 14px;font-size:13px;margin-bottom:16px;text-align:center}
 </body>
 </html>"""
 
-@app.route("/login",methods=["GET","POST"])
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    error=""
-    if request.method=="POST":
-        username=request.form.get("username","")
-        password=request.form.get("password","")
-        if username==ADMIN_USERNAME and password==ADMIN_PASSWORD:
-            session["logged_in"]=True
-            add_log("login","admin",f"Вход: {username}")
+    error = ""
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session["logged_in"] = True
+            add_log("login", "admin", f"Вход: {username}")
             return redirect("/")
-        error="Неверный логин или пароль"
+        error = "Неверный логин или пароль"
         logger.warning(f"Неудачный вход: {username}")
-    return render_template_string(LOGIN_HTML,error=error)
+    return render_template_string(LOGIN_HTML, error=error)
 
 @app.route("/logout")
 def logout():
@@ -269,62 +268,62 @@ TG_TOKEN   = "8757251631:AAHMFD4cg1dU9SdZ8-7HMDxy5qDUpSc5TIs"
 TG_CHAT_ID = "1053431273"
 TG_API     = f"https://api.telegram.org/bot{TG_TOKEN}"
 
-def tg_send(text,reply_markup=None):
+def tg_send(text, reply_markup=None):
     try:
-        data={"chat_id":TG_CHAT_ID,"text":text,"parse_mode":"HTML"}
+        data = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
         if reply_markup:
-            data["reply_markup"]=json.dumps(reply_markup)
-        requests.post(f"{TG_API}/sendMessage",data=data,timeout=5)
+            data["reply_markup"] = json.dumps(reply_markup)
+        requests.post(f"{TG_API}/sendMessage", data=data, timeout=5)
     except Exception as e:
         logger.error(f"tg_send error: {e}")
 
-def tg_answer_callback(callback_id,text):
+def tg_answer_callback(callback_id, text):
     try:
         requests.post(f"{TG_API}/answerCallbackQuery",
-                      data={"callback_query_id":callback_id,"text":text},timeout=5)
+                      data={"callback_query_id": callback_id, "text": text}, timeout=5)
     except: pass
 
-def tg_notify_new_pin(pin_id,name,car,phone,pin):
-    text=(f"🔑 <b>Новая заявка</b>\n\n"
-          f"👤 {name}\n🚗 {car}\n📱 {phone}\n🔐 ПИН: <b>{pin}</b>")
-    markup={"inline_keyboard":[[
-        {"text":"✅ Одобрить","callback_data":f"approve:{pin_id}"},
-        {"text":"❌ Отказать","callback_data":f"reject:{pin_id}"}
+def tg_notify_new_pin(pin_id, name, car, phone, pin):
+    text = (f"🔑 <b>Новая заявка</b>\n\n"
+            f"👤 {name}\n🚗 {car}\n📱 {phone}\n🔐 ПИН: <b>{pin}</b>")
+    markup = {"inline_keyboard": [[
+        {"text": "✅ Одобрить", "callback_data": f"approve:{pin_id}"},
+        {"text": "❌ Отказать", "callback_data": f"reject:{pin_id}"}
     ]]}
-    tg_send(text,markup)
+    tg_send(text, markup)
 
-def tg_notify_balance_request(req_id,car,amount):
-    text=(f"💰 <b>Заявка на пополнение</b>\n\n"
-          f"🚗 {car}\n💵 {amount:,} сум")
-    markup={"inline_keyboard":[[
-        {"text":"✅ Одобрить","callback_data":f"bal_approve:{req_id}"},
-        {"text":"❌ Отказать","callback_data":f"bal_reject:{req_id}"}
+def tg_notify_balance_request(req_id, car, amount):
+    text = (f"💰 <b>Заявка на пополнение</b>\n\n"
+            f"🚗 {car}\n💵 {amount:,} сум")
+    markup = {"inline_keyboard": [[
+        {"text": "✅ Одобрить", "callback_data": f"bal_approve:{req_id}"},
+        {"text": "❌ Отказать", "callback_data": f"bal_reject:{req_id}"}
     ]]}
-    tg_send(text,markup)
+    tg_send(text, markup)
 
-def tg_notify_approved(name,car,pin):
+def tg_notify_approved(name, car, pin):
     tg_send(f"✅ <b>{name}</b> ({car}) одобрен!\nПИН: <b>{pin}</b>")
 
-def tg_notify_rejected(name,car):
+def tg_notify_rejected(name, car):
     tg_send(f"❌ Заявка <b>{name}</b> ({car}) отклонена")
 
-def tg_notify_shift_start(car,name):
+def tg_notify_shift_start(car, name):
     tg_send(f"🟢 <b>Смена начата</b>\n🚗 {car} — {name}\n⏱ {datetime.now().strftime('%H:%M:%S')}")
 
-def tg_notify_shift_end(car,name,revenue,orders):
+def tg_notify_shift_end(car, name, revenue, orders):
     tg_send(f"🔴 <b>Смена завершена</b>\n🚗 {car} — {name}\n💰 {revenue:,} сум\n📦 {orders} заказов")
 
-def tg_notify_order_completed(car,from_addr,to_addr,price):
+def tg_notify_order_completed(car, from_addr, to_addr, price):
     tg_send(f"✅ <b>Заказ завершён</b>\n🚗 {car}\n📍 {from_addr}→{to_addr}\n💰 {price:,} сум")
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
-def add_log(action,car_number,details):
+def add_log(action, car_number, details):
     try:
         with db_lock:
-            conn=get_db()
+            conn = get_db()
             conn.execute(
                 "INSERT INTO logs (action,car_number,details,created_at) VALUES (?,?,?,?)",
-                (action,car_number or "—",details,time.time()))
+                (action, car_number or "—", details, time.time()))
             conn.commit()
             conn.close()
         logger.info(f"[{action}] {car_number}: {details}")
@@ -333,285 +332,334 @@ def add_log(action,car_number,details):
 
 def get_rating_db(car_number):
     try:
-        conn=get_db()
-        row=conn.execute(
+        conn = get_db()
+        row = conn.execute(
             "SELECT ROUND(AVG(stars),1) as avg,COUNT(*) as cnt FROM ratings WHERE car_number=?",
             (car_number,)).fetchone()
-        orders=conn.execute(
+        orders = conn.execute(
             "SELECT COUNT(*) FROM orders WHERE car_number=? AND status='completed'",
             (car_number,)).fetchone()[0]
         conn.close()
-        avg=float(row["avg"]) if row["avg"] else 5.0
-        return {"avg":avg,"count":row["cnt"],"orders":orders}
+        avg = float(row["avg"]) if row["avg"] else 5.0
+        return {"avg": avg, "count": row["cnt"], "orders": orders}
     except Exception as e:
         logger.error(f"get_rating_db error: {e}")
-        return {"avg":5.0,"count":0,"orders":0}
+        return {"avg": 5.0, "count": 0, "orders": 0}
 
-def update_balance_db(car_number,amount,type_,comment=""):
+def update_balance_db(car_number, amount, type_, comment=""):
     try:
         with db_lock:
-            conn=get_db()
-            conn.execute("UPDATE drivers SET balance=balance+? WHERE car_number=?",(amount,car_number))
+            conn = get_db()
+            conn.execute(
+                "UPDATE drivers SET balance=balance+? WHERE car_number=?",
+                (amount, car_number))
             conn.execute(
                 "INSERT INTO transactions (car_number,amount,type,comment,created_at) VALUES (?,?,?,?,?)",
-                (car_number,amount,type_,comment,time.time()))
-            new_b=conn.execute(
-                "SELECT balance FROM drivers WHERE car_number=?",(car_number,)).fetchone()["balance"]
+                (car_number, amount, type_, comment, time.time()))
+            new_b = conn.execute(
+                "SELECT balance FROM drivers WHERE car_number=?",
+                (car_number,)).fetchone()["balance"]
             conn.commit()
             conn.close()
-        add_log("balance",car_number,f"{type_}: {amount:,} сум | Итого: {new_b:,} сум")
+        add_log("balance", car_number, f"{type_}: {amount:,} сум | Итого: {new_b:,} сум")
         return new_b
     except Exception as e:
         logger.error(f"update_balance_db error: {e}")
         return 0
 
-def add_rating_db(car_number,stars):
+def add_rating_db(car_number, stars):
     try:
         with db_lock:
-            conn=get_db()
+            conn = get_db()
             conn.execute(
                 "INSERT INTO ratings (car_number,stars,created_at) VALUES (?,?,?)",
-                (car_number,stars,time.time()))
+                (car_number, stars, time.time()))
             conn.commit()
             conn.close()
-        add_log("rating",car_number,f"Оценка: {stars}⭐")
+        add_log("rating", car_number, f"Оценка: {stars}⭐")
     except Exception as e:
         logger.error(f"add_rating_db error: {e}")
 
 def get_stars(avg):
-    if avg>=4.8: return "⭐⭐⭐⭐⭐"
-    if avg>=4.0: return "⭐⭐⭐⭐"
-    if avg>=3.0: return "⭐⭐⭐"
-    if avg>=2.0: return "⭐⭐"
+    if avg >= 4.8: return "⭐⭐⭐⭐⭐"
+    if avg >= 4.0: return "⭐⭐⭐⭐"
+    if avg >= 3.0: return "⭐⭐⭐"
+    if avg >= 2.0: return "⭐⭐"
     return "⭐"
 
-def create_order_db(car_number,from_addr,to_addr,price,client="Диспетчер",distance="—"):
+def create_order_db(car_number, from_addr, to_addr, price, client="Диспетчер", distance="—"):
     try:
         with db_lock:
-            conn=get_db()
-            driver=conn.execute(
-                "SELECT status FROM drivers WHERE car_number=?",(car_number,)).fetchone()
-            if driver and driver["status"]=="busy":
+            conn = get_db()
+            driver = conn.execute(
+                "SELECT status FROM drivers WHERE car_number=?", (car_number,)).fetchone()
+            if driver and driver["status"] == "busy":
                 conn.close()
-                return None,"Водитель уже на заказе"
+                return None, "Водитель уже на заказе"
             conn.execute(
                 """UPDATE orders SET status='cancelled',cancelled_at=?,cancel_reason='Новый заказ'
-                WHERE car_number=? AND status='pending'""",(time.time(),car_number))
-            cursor=conn.execute(
+                WHERE car_number=? AND status='pending'""", (time.time(), car_number))
+            cursor = conn.execute(
                 """INSERT INTO orders
                 (car_number,from_address,to_address,distance,price,client,status,created_at)
                 VALUES (?,?,?,?,?,?,?,?)""",
-                (car_number,from_addr,to_addr,distance,price,client,"pending",time.time()))
-            order_id=cursor.lastrowid
-            conn.execute("UPDATE drivers SET status='busy' WHERE car_number=?",(car_number,))
+                (car_number, from_addr, to_addr, distance, price, client, "pending", time.time()))
+            order_id = cursor.lastrowid
+            conn.execute(
+                "UPDATE drivers SET status='busy' WHERE car_number=?", (car_number,))
             conn.commit()
             conn.close()
-        add_log("create_order",car_number,f"Заказ #{order_id}: {from_addr}→{to_addr} | {price:,} сум")
-        return order_id,None
+        add_log("create_order", car_number,
+                f"Заказ #{order_id}: {from_addr}→{to_addr} | {price:,} сум")
+        return order_id, None
     except Exception as e:
         logger.error(f"create_order_db error: {e}")
-        return None,str(e)
+        return None, str(e)
 
 def complete_order_db(order_id):
     try:
         with db_lock:
-            conn=get_db()
-            order=conn.execute("SELECT * FROM orders WHERE id=?",(order_id,)).fetchone()
+            conn = get_db()
+            order = conn.execute(
+                "SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
             if not order:
                 conn.close()
-                return False,"Заказ не найден"
-            if order["status"]!="pending":
+                return False, "Заказ не найден"
+            if order["status"] != "pending":
                 conn.close()
-                return False,"Заказ уже обработан"
-            car=order["car_number"]
-            price=order["price"]
+                return False, "Заказ уже обработан"
+            car   = order["car_number"]
+            price = order["price"]
             conn.execute(
                 "UPDATE orders SET status='completed',completed_at=? WHERE id=?",
-                (time.time(),order_id))
-            conn.execute("UPDATE drivers SET status='free' WHERE car_number=?",(car,))
+                (time.time(), order_id))
+            conn.execute(
+                "UPDATE drivers SET status='free' WHERE car_number=?", (car,))
             conn.execute(
                 """UPDATE shifts SET revenue=revenue+?,orders_count=orders_count+1
-                WHERE car_number=? AND end_time IS NULL""",(price,car))
+                WHERE car_number=? AND end_time IS NULL""", (price, car))
             conn.commit()
             conn.close()
-        add_log("complete_order",car,f"Заказ #{order_id} завершён | {price:,} сум")
-        tg_notify_order_completed(car,order["from_address"],order["to_address"],price)
-        return True,"Заказ завершён"
+        add_log("complete_order", car, f"Заказ #{order_id} завершён | {price:,} сум")
+        tg_notify_order_completed(car, order["from_address"], order["to_address"], price)
+        return True, "Заказ завершён"
     except Exception as e:
         logger.error(f"complete_order_db error: {e}")
-        return False,str(e)
+        return False, str(e)
 
-def cancel_order_db(order_id,reason="Отменён диспетчером"):
+def cancel_order_db(order_id, reason="Отменён диспетчером"):
     try:
         with db_lock:
-            conn=get_db()
-            order=conn.execute("SELECT * FROM orders WHERE id=?",(order_id,)).fetchone()
+            conn = get_db()
+            order = conn.execute(
+                "SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
             if not order:
                 conn.close()
-                return False,"Заказ не найден"
-            if order["status"]!="pending":
+                return False, "Заказ не найден"
+            if order["status"] != "pending":
                 conn.close()
-                return False,"Заказ уже обработан"
-            car=order["car_number"]
+                return False, "Заказ уже обработан"
+            car = order["car_number"]
             conn.execute(
                 "UPDATE orders SET status='cancelled',cancelled_at=?,cancel_reason=? WHERE id=?",
-                (time.time(),reason,order_id))
-            conn.execute("UPDATE drivers SET status='free' WHERE car_number=?",(car,))
+                (time.time(), reason, order_id))
+            conn.execute(
+                "UPDATE drivers SET status='free' WHERE car_number=?", (car,))
             conn.commit()
             conn.close()
-        add_log("cancel_order",car,f"Заказ #{order_id} отменён: {reason}")
-        return True,"Заказ отменён"
+        add_log("cancel_order", car, f"Заказ #{order_id} отменён: {reason}")
+        return True, "Заказ отменён"
     except Exception as e:
         logger.error(f"cancel_order_db error: {e}")
-        return False,str(e)
+        return False, str(e)
 
 def start_shift(car_number):
     try:
         with db_lock:
-            conn=get_db()
-            active=conn.execute(
+            conn = get_db()
+            active = conn.execute(
                 "SELECT id FROM shifts WHERE car_number=? AND end_time IS NULL",
                 (car_number,)).fetchone()
             if active:
                 conn.close()
-                return False,"Смена уже начата"
+                return False, "Смена уже начата"
             conn.execute(
                 "INSERT INTO shifts (car_number,start_time,revenue,orders_count) VALUES (?,?,0,0)",
-                (car_number,time.time()))
-            conn.execute("UPDATE drivers SET status='free' WHERE car_number=?",(car_number,))
-            driver=conn.execute(
-                "SELECT name FROM drivers WHERE car_number=?",(car_number,)).fetchone()
+                (car_number, time.time()))
+            conn.execute(
+                "UPDATE drivers SET status='free' WHERE car_number=?", (car_number,))
+            driver = conn.execute(
+                "SELECT name FROM drivers WHERE car_number=?", (car_number,)).fetchone()
             conn.commit()
             conn.close()
-        name=driver["name"] if driver else car_number
-        add_log("shift_start",car_number,f"Смена начата {datetime.now().strftime('%H:%M')}")
-        tg_notify_shift_start(car_number,name)
-        return True,"Смена начата"
+        name = driver["name"] if driver else car_number
+        add_log("shift_start", car_number,
+                f"Смена начата {datetime.now().strftime('%H:%M')}")
+        tg_notify_shift_start(car_number, name)
+        return True, "Смена начата"
     except Exception as e:
         logger.error(f"start_shift error: {e}")
-        return False,str(e)
+        return False, str(e)
 
 def end_shift(car_number):
     try:
         with db_lock:
-            conn=get_db()
-            shift=conn.execute(
+            conn = get_db()
+            shift = conn.execute(
                 "SELECT * FROM shifts WHERE car_number=? AND end_time IS NULL",
                 (car_number,)).fetchone()
             if not shift:
                 conn.close()
-                return False,"Нет активной смены"
+                return False, "Нет активной смены"
             conn.execute(
-                "UPDATE shifts SET end_time=? WHERE id=?",(time.time(),shift["id"]))
-            conn.execute("UPDATE drivers SET status='offline' WHERE car_number=?",(car_number,))
-            driver=conn.execute(
-                "SELECT name FROM drivers WHERE car_number=?",(car_number,)).fetchone()
+                "UPDATE shifts SET end_time=? WHERE id=?",
+                (time.time(), shift["id"]))
+            conn.execute(
+                "UPDATE drivers SET status='offline' WHERE car_number=?", (car_number,))
+            driver = conn.execute(
+                "SELECT name FROM drivers WHERE car_number=?", (car_number,)).fetchone()
             conn.commit()
             conn.close()
-        name=driver["name"] if driver else car_number
-        add_log("shift_end",car_number,
+        name = driver["name"] if driver else car_number
+        add_log("shift_end", car_number,
                 f"Смена завершена | {shift['revenue']:,} сум | {shift['orders_count']} заказов")
-        tg_notify_shift_end(car_number,name,shift["revenue"],shift["orders_count"])
-        return True,"Смена завершена"
+        tg_notify_shift_end(car_number, name, shift["revenue"], shift["orders_count"])
+        return True, "Смена завершена"
     except Exception as e:
         logger.error(f"end_shift error: {e}")
-        return False,str(e)
+        return False, str(e)
 
-# ==================== ТАЙМАУТ ЗАКАЗОВ ====================
-ORDER_TIMEOUT=60
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+ORDER_TIMEOUT = 60
 
 def auto_timeout_orders():
     while True:
         try:
             with db_lock:
-                conn=get_db()
-                timeout_time=time.time()-(ORDER_TIMEOUT*60)
-                old=conn.execute(
+                conn = get_db()
+                timeout_time = time.time() - (ORDER_TIMEOUT * 60)
+                old = conn.execute(
                     "SELECT * FROM orders WHERE status='pending' AND created_at<?",
                     (timeout_time,)).fetchall()
                 for o in old:
                     conn.execute(
                         """UPDATE orders SET status='cancelled',cancelled_at=?,
-                        cancel_reason='Таймаут' WHERE id=?""",(time.time(),o["id"]))
+                        cancel_reason='Таймаут' WHERE id=?""",
+                        (time.time(), o["id"]))
                     conn.execute(
-                        "UPDATE drivers SET status='free' WHERE car_number=?",(o["car_number"],))
+                        "UPDATE drivers SET status='free' WHERE car_number=?",
+                        (o["car_number"],))
                     logger.info(f"⏰ Заказ #{o['id']} отменён по таймауту")
-                conn.commit()
+                if old:
+                    conn.commit()
                 conn.close()
         except Exception as e:
             logger.error(f"auto_timeout error: {e}")
         time.sleep(120)
 
-threading.Thread(target=auto_timeout_orders,daemon=True).start()
+def auto_offline_drivers():
+    while True:
+        try:
+            with db_lock:
+                conn = get_db()
+                timeout = time.time() - 120
+                rows = conn.execute(
+                    """SELECT car_number,name FROM drivers
+                    WHERE status != 'offline'
+                    AND last_seen > 0
+                    AND last_seen < ?""",
+                    (timeout,)).fetchall()
+                for r in rows:
+                    conn.execute(
+                        "UPDATE drivers SET status='offline' WHERE car_number=?",
+                        (r["car_number"],))
+                    logger.info(f"⚫ {r['car_number']} ушёл офлайн")
+                    tg_send(f"⚫ Водитель <b>{r['car_number']}</b> — {r['name']} офлайн")
+                if rows:
+                    conn.commit()
+                conn.close()
+        except Exception as e:
+            logger.error(f"auto_offline error: {e}")
+        time.sleep(60)
+
+threading.Thread(target=auto_timeout_orders, daemon=True).start()
+threading.Thread(target=auto_offline_drivers, daemon=True).start()
 
 # ==================== TELEGRAM POLLING ====================
-tg_offset=0
+tg_offset = 0
 
 def tg_polling():
     global tg_offset
     logger.info("🤖 Telegram бот запущен")
     while True:
         try:
-            resp=requests.get(
+            resp = requests.get(
                 f"{TG_API}/getUpdates",
-                params={"offset":tg_offset,"timeout":30},timeout=35)
-            updates=resp.json().get("result",[])
+                params={"offset": tg_offset, "timeout": 30},
+                timeout=35)
+            updates = resp.json().get("result", [])
             for upd in updates:
-                tg_offset=upd["update_id"]+1
+                tg_offset = upd["update_id"] + 1
                 if "callback_query" in upd:
-                    cq=upd["callback_query"]
-                    cq_id=cq["id"]
-                    data=cq.get("data","")
+                    cq    = upd["callback_query"]
+                    cq_id = cq["id"]
+                    data  = cq.get("data", "")
                     if data.startswith("approve:"):
-                        pin_id=data.split(":",1)[1]
+                        pin_id = data.split(":", 1)[1]
                         with db_lock:
-                            conn=get_db()
-                            row=conn.execute(
-                                "SELECT * FROM pending_pins WHERE id=?",(pin_id,)).fetchone()
-                            if row and row["status"]=="pending":
+                            conn = get_db()
+                            row  = conn.execute(
+                                "SELECT * FROM pending_pins WHERE id=?",
+                                (pin_id,)).fetchone()
+                            if row and row["status"] == "pending":
                                 conn.execute(
-                                    "UPDATE pending_pins SET status='approved' WHERE id=?",(pin_id,))
+                                    "UPDATE pending_pins SET status='approved' WHERE id=?",
+                                    (pin_id,))
                                 conn.execute(
                                     """INSERT OR IGNORE INTO drivers
-                                    (car_number,name,phone,pin,balance,status,created_at)
-                                    VALUES (?,?,?,?,50000,'offline',?)""",
-                                    (row["car_number"],row["name"],
-                                     row["phone"],row["pin"],time.time()))
+                                    (car_number,name,phone,pin,balance,status,last_seen,created_at)
+                                    VALUES (?,?,?,?,50000,'offline',0,?)""",
+                                    (row["car_number"], row["name"],
+                                     row["phone"], row["pin"], time.time()))
                                 conn.commit()
                                 conn.close()
-                                tg_answer_callback(cq_id,"✅ Одобрено!")
-                                tg_notify_approved(row["name"],row["car_number"],row["pin"])
-                                add_log("approve_pin",row["car_number"],f"Одобрен: {row['name']}")
+                                tg_answer_callback(cq_id, "✅ Одобрено!")
+                                tg_notify_approved(row["name"], row["car_number"], row["pin"])
+                                add_log("approve_pin", row["car_number"],
+                                        f"Одобрен: {row['name']}")
                             else:
                                 conn.close()
-                                tg_answer_callback(cq_id,"Не найдено")
+                                tg_answer_callback(cq_id, "Не найдено")
                     elif data.startswith("reject:"):
-                        pin_id=data.split(":",1)[1]
+                        pin_id = data.split(":", 1)[1]
                         with db_lock:
-                            conn=get_db()
-                            row=conn.execute(
-                                "SELECT * FROM pending_pins WHERE id=?",(pin_id,)).fetchone()
+                            conn = get_db()
+                            row  = conn.execute(
+                                "SELECT * FROM pending_pins WHERE id=?",
+                                (pin_id,)).fetchone()
                             if row:
                                 conn.execute(
-                                    "UPDATE pending_pins SET status='rejected' WHERE id=?",(pin_id,))
+                                    "UPDATE pending_pins SET status='rejected' WHERE id=?",
+                                    (pin_id,))
                                 conn.commit()
                                 conn.close()
-                                tg_answer_callback(cq_id,"❌ Отклонено")
-                                tg_notify_rejected(row["name"],row["car_number"])
+                                tg_answer_callback(cq_id, "❌ Отклонено")
+                                tg_notify_rejected(row["name"], row["car_number"])
                             else:
                                 conn.close()
                     elif data.startswith("bal_approve:"):
-                        req_id=int(data.split(":",1)[1])
+                        req_id = int(data.split(":", 1)[1])
                         with db_lock:
-                            conn=get_db()
-                            row=conn.execute(
-                                "SELECT * FROM balance_requests WHERE id=?",(req_id,)).fetchone()
-                            if row and row["status"]=="pending":
-                                car=row["car_number"]
-                                amount=row["amount"]
+                            conn = get_db()
+                            row  = conn.execute(
+                                "SELECT * FROM balance_requests WHERE id=?",
+                                (req_id,)).fetchone()
+                            if row and row["status"] == "pending":
+                                car    = row["car_number"]
+                                amount = row["amount"]
                                 conn.execute(
                                     "UPDATE drivers SET balance=balance+? WHERE car_number=?",
-                                    (amount,car))
+                                    (amount, car))
                                 conn.execute(
                                     "UPDATE balance_requests SET status='approved' WHERE id=?",
                                     (req_id,))
@@ -619,31 +667,33 @@ def tg_polling():
                                     """INSERT INTO transactions
                                     (car_number,amount,type,comment,created_at)
                                     VALUES (?,?,?,?,?)""",
-                                    (car,amount,"deposit","Пополнение одобрено",time.time()))
-                                new_b=conn.execute(
+                                    (car, amount, "deposit",
+                                     "Пополнение одобрено", time.time()))
+                                new_b = conn.execute(
                                     "SELECT balance FROM drivers WHERE car_number=?",
                                     (car,)).fetchone()["balance"]
                                 conn.commit()
                                 conn.close()
-                                tg_answer_callback(cq_id,"✅ Баланс пополнен!")
+                                tg_answer_callback(cq_id, "✅ Баланс пополнен!")
                                 tg_send(f"✅ Баланс <b>{car}</b>: <b>{new_b:,} сум</b>")
-                                add_log("balance_approve",car,f"{amount:,} сум")
+                                add_log("balance_approve", car, f"{amount:,} сум")
                             else:
                                 conn.close()
-                                tg_answer_callback(cq_id,"Не найдено")
+                                tg_answer_callback(cq_id, "Не найдено")
                     elif data.startswith("bal_reject:"):
-                        req_id=int(data.split(":",1)[1])
+                        req_id = int(data.split(":", 1)[1])
                         with db_lock:
-                            conn=get_db()
+                            conn = get_db()
                             conn.execute(
-                                "UPDATE balance_requests SET status='rejected' WHERE id=?",(req_id,))
+                                "UPDATE balance_requests SET status='rejected' WHERE id=?",
+                                (req_id,))
                             conn.commit()
                             conn.close()
-                        tg_answer_callback(cq_id,"❌ Отклонено")
+                        tg_answer_callback(cq_id, "❌ Отклонено")
                 elif "message" in upd:
-                    msg=upd["message"]
-                    text_msg=msg.get("text","")
-                    if text_msg=="/start":
+                    msg      = upd["message"]
+                    text_msg = msg.get("text", "")
+                    if text_msg == "/start":
                         tg_send(
                             "🚕 <b>TAXI 3042 Xazarasp</b>\n\n"
                             "/status — статус\n/drivers — водители\n"
@@ -651,224 +701,213 @@ def tg_polling():
                             "/rating — рейтинг\n/pending — заявки\n"
                             "/shifts — смены\n/logs — логи\n\n"
                             "<code>/order НОМЕР Откуда;Куда;Цена</code>")
-                    elif text_msg=="/status":
-                        conn=get_db()
-                        free=conn.execute("SELECT COUNT(*) FROM drivers WHERE status='free'").fetchone()[0]
-                        busy=conn.execute("SELECT COUNT(*) FROM drivers WHERE status='busy'").fetchone()[0]
-                        total=conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
-                        pending=conn.execute("SELECT COUNT(*) FROM pending_pins WHERE status='pending'").fetchone()[0]
-                        active=conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
-                        rev=conn.execute("SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'").fetchone()[0]
+                    elif text_msg == "/status":
+                        conn   = get_db()
+                        free   = conn.execute("SELECT COUNT(*) FROM drivers WHERE status='free'").fetchone()[0]
+                        busy   = conn.execute("SELECT COUNT(*) FROM drivers WHERE status='busy'").fetchone()[0]
+                        total  = conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
+                        online = conn.execute("SELECT COUNT(*) FROM drivers WHERE status!='offline'").fetchone()[0]
+                        pend   = conn.execute("SELECT COUNT(*) FROM pending_pins WHERE status='pending'").fetchone()[0]
+                        active = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
+                        rev    = conn.execute("SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'").fetchone()[0]
                         conn.close()
-                        tg_send(f"📊 <b>Статус</b>\n\n🟢 Свободны: {free}\n🔴 На заказе: {busy}\n"
-                                f"👥 Всего: {total}\n📦 Акт.заказов: {active}\n"
-                                f"⏳ Ждут ПИН: {pending}\n💰 Выручка: {rev:,} сум")
-                    elif text_msg=="/drivers":
-                        conn=get_db()
-                        rows=conn.execute("SELECT * FROM drivers WHERE status!='offline'").fetchall()
+                        tg_send(
+                            f"📊 <b>Статус</b>\n\n"
+                            f"🟢 Свободны: {free}\n🔴 На заказе: {busy}\n"
+                            f"📍 Онлайн: {online}\n👥 Всего: {total}\n"
+                            f"📦 Акт.заказов: {active}\n⏳ Ждут ПИН: {pend}\n"
+                            f"💰 Выручка: {rev:,} сум")
+                    elif text_msg == "/drivers":
+                        conn = get_db()
+                        rows = conn.execute(
+                            "SELECT * FROM drivers WHERE status!='offline'").fetchall()
                         conn.close()
-                        if not rows: tg_send("Нет водителей онлайн")
+                        if not rows:
+                            tg_send("Нет водителей онлайн")
                         else:
-                            lines=[]
+                            lines = []
                             for d in rows:
-                                icon="🟢" if d["status"]=="free" else "🔴"
-                                lines.append(f"{icon} <b>{d['car_number']}</b> — {d['name']}\n   💰 {d['balance']:,} сум")
-                            tg_send("🚗 <b>Водители онлайн:</b>\n\n"+"\n".join(lines))
-                    elif text_msg=="/orders":
-                        conn=get_db()
-                        rows=conn.execute("SELECT * FROM orders WHERE status='pending'").fetchall()
+                                icon = "🟢" if d["status"] == "free" else "🔴"
+                                lines.append(
+                                    f"{icon} <b>{d['car_number']}</b> — {d['name']}\n"
+                                    f"   💰 {d['balance']:,} сум")
+                            tg_send("🚗 <b>Водители онлайн:</b>\n\n" + "\n".join(lines))
+                    elif text_msg == "/orders":
+                        conn = get_db()
+                        rows = conn.execute(
+                            "SELECT * FROM orders WHERE status='pending'").fetchall()
                         conn.close()
-                        if not rows: tg_send("Нет активных заказов")
+                        if not rows:
+                            tg_send("Нет активных заказов")
                         else:
                             for o in rows:
-                                tg_send(f"📦 <b>#{o['id']}</b> | {o['car_number']}\n"
-                                        f"📍 {o['from_address']}→{o['to_address']}\n💰 {o['price']:,} сум")
-                    elif text_msg=="/revenue":
-                        conn=get_db()
-                        rows=conn.execute(
+                                tg_send(
+                                    f"📦 <b>#{o['id']}</b> | {o['car_number']}\n"
+                                    f"📍 {o['from_address']}→{o['to_address']}\n"
+                                    f"💰 {o['price']:,} сум")
+                    elif text_msg == "/revenue":
+                        conn  = get_db()
+                        rows  = conn.execute(
                             """SELECT car_number,SUM(price) as rev FROM orders
-                            WHERE status='completed' GROUP BY car_number ORDER BY rev DESC LIMIT 10"""
-                        ).fetchall()
-                        total=conn.execute(
+                            WHERE status='completed' GROUP BY car_number
+                            ORDER BY rev DESC LIMIT 10""").fetchall()
+                        total = conn.execute(
                             "SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'"
                         ).fetchone()[0]
                         conn.close()
-                        if not rows: tg_send("Нет данных")
+                        if not rows:
+                            tg_send("Нет данных")
                         else:
-                            lines=[f"🚗 <b>{r['car_number']}</b>: {r['rev']:,} сум" for r in rows]
-                            tg_send("💰 <b>Выручка:</b>\n\n"+"\n".join(lines)+f"\n\n📊 Итого: <b>{total:,} сум</b>")
-                    elif text_msg=="/rating":
-                        conn=get_db()
-                        rows=conn.execute(
+                            lines = [f"🚗 <b>{r['car_number']}</b>: {r['rev']:,} сум"
+                                     for r in rows]
+                            tg_send("💰 <b>Выручка:</b>\n\n" + "\n".join(lines) +
+                                    f"\n\n📊 Итого: <b>{total:,} сум</b>")
+                    elif text_msg == "/rating":
+                        conn = get_db()
+                        rows = conn.execute(
                             """SELECT car_number,ROUND(AVG(stars),1) as avg,COUNT(*) as cnt
-                            FROM ratings GROUP BY car_number ORDER BY avg DESC LIMIT 10"""
-                        ).fetchall()
+                            FROM ratings GROUP BY car_number
+                            ORDER BY avg DESC LIMIT 10""").fetchall()
                         conn.close()
-                        if not rows: tg_send("Нет данных")
+                        if not rows:
+                            tg_send("Нет данных")
                         else:
-                            lines=[f"{i+1}. <b>{r['car_number']}</b> — ⭐{r['avg']} ({r['cnt']} оценок)"
-                                   for i,r in enumerate(rows)]
-                            tg_send("🏆 <b>Рейтинг:</b>\n\n"+"\n".join(lines))
-                    elif text_msg=="/pending":
-                        conn=get_db()
-                        rows=conn.execute("SELECT * FROM pending_pins WHERE status='pending'").fetchall()
+                            lines = [
+                                f"{i+1}. <b>{r['car_number']}</b> — ⭐{r['avg']} ({r['cnt']} оценок)"
+                                for i, r in enumerate(rows)]
+                            tg_send("🏆 <b>Рейтинг:</b>\n\n" + "\n".join(lines))
+                    elif text_msg == "/pending":
+                        conn = get_db()
+                        rows = conn.execute(
+                            "SELECT * FROM pending_pins WHERE status='pending'").fetchall()
                         conn.close()
-                        if not rows: tg_send("Нет заявок")
+                        if not rows:
+                            tg_send("Нет заявок")
                         else:
                             for p in rows:
-                                tg_send(f"⏳ <b>{p['name']}</b>\n🚗 {p['car_number']}\n"
-                                        f"📱 {p['phone']}\n🔐 ПИН: <b>{p['pin']}</b>")
-                    elif text_msg=="/shifts":
-                        conn=get_db()
-                        rows=conn.execute(
+                                tg_send(
+                                    f"⏳ <b>{p['name']}</b>\n🚗 {p['car_number']}\n"
+                                    f"📱 {p['phone']}\n🔐 ПИН: <b>{p['pin']}</b>")
+                    elif text_msg == "/shifts":
+                        conn = get_db()
+                        rows = conn.execute(
                             """SELECT s.*,d.name FROM shifts s
                             LEFT JOIN drivers d ON s.car_number=d.car_number
-                            ORDER BY s.start_time DESC LIMIT 10"""
-                        ).fetchall()
+                            ORDER BY s.start_time DESC LIMIT 10""").fetchall()
                         conn.close()
-                        if not rows: tg_send("Нет смен")
+                        if not rows:
+                            tg_send("Нет смен")
                         else:
-                            lines=[]
+                            lines = []
                             for r in rows:
-                                start=datetime.fromtimestamp(r["start_time"]).strftime("%d.%m %H:%M")
-                                end=datetime.fromtimestamp(r["end_time"]).strftime("%H:%M") if r["end_time"] else "▶"
-                                lines.append(f"🚗 <b>{r['car_number']}</b>\n"
-                                             f"   ⏱ {start}→{end} | 💰{r['revenue']:,} | 📦{r['orders_count']}")
-                            tg_send("⏱ <b>Смены:</b>\n\n"+"\n\n".join(lines))
-                    elif text_msg=="/logs":
-                        conn=get_db()
-                        rows=conn.execute(
+                                start = datetime.fromtimestamp(
+                                    r["start_time"]).strftime("%d.%m %H:%M")
+                                end = datetime.fromtimestamp(
+                                    r["end_time"]).strftime("%H:%M") if r["end_time"] else "▶"
+                                lines.append(
+                                    f"🚗 <b>{r['car_number']}</b>\n"
+                                    f"   ⏱ {start}→{end} | "
+                                    f"💰{r['revenue']:,} | 📦{r['orders_count']}")
+                            tg_send("⏱ <b>Смены:</b>\n\n" + "\n\n".join(lines))
+                    elif text_msg == "/logs":
+                        conn = get_db()
+                        rows = conn.execute(
                             "SELECT * FROM logs ORDER BY created_at DESC LIMIT 10").fetchall()
                         conn.close()
-                        if not rows: tg_send("Нет логов")
+                        if not rows:
+                            tg_send("Нет логов")
                         else:
-                            lines=[]
+                            lines = []
                             for r in rows:
-                                t=datetime.fromtimestamp(r["created_at"]).strftime("%H:%M:%S")
-                                lines.append(f"[{t}] <b>{r['action']}</b> {r['car_number']}\n{r['details']}")
-                            tg_send("📝 <b>Логи:</b>\n\n"+"\n\n".join(lines))
+                                t = datetime.fromtimestamp(
+                                    r["created_at"]).strftime("%H:%M:%S")
+                                lines.append(
+                                    f"[{t}] <b>{r['action']}</b> "
+                                    f"{r['car_number']}\n{r['details']}")
+                            tg_send("📝 <b>Логи:</b>\n\n" + "\n\n".join(lines))
                     elif text_msg.startswith("/order "):
                         try:
-                            parts=text_msg.split(" ",2)
-                            car=parts[1].strip().upper()
-                            info=parts[2].split(";")
-                            from_addr=info[0].strip()
-                            to_addr=info[1].strip()
-                            price=int(info[2].strip())
-                            oid,err=create_order_db(car,from_addr,to_addr,price,"Telegram")
-                            if oid: tg_send(f"✅ Заказ #{oid} → {car}\n{from_addr}→{to_addr}\n💰{price:,} сум")
-                            else: tg_send(f"❌ {err}")
+                            parts     = text_msg.split(" ", 2)
+                            car       = parts[1].strip().upper()
+                            info      = parts[2].split(";")
+                            from_addr = info[0].strip()
+                            to_addr   = info[1].strip()
+                            price     = int(info[2].strip())
+                            oid, err  = create_order_db(
+                                car, from_addr, to_addr, price, "Telegram")
+                            if oid:
+                                tg_send(
+                                    f"✅ Заказ #{oid} → {car}\n"
+                                    f"{from_addr}→{to_addr}\n💰{price:,} сум")
+                            else:
+                                tg_send(f"❌ {err}")
                         except Exception as e:
-                            tg_send(f"❌ Ошибка: {e}\nФормат: /order НОМЕР Откуда;Куда;Цена")
+                            tg_send(
+                                f"❌ Ошибка: {e}\n"
+                                f"Формат: /order НОМЕР Откуда;Куда;Цена")
         except Exception as e:
             logger.error(f"tg_polling error: {e}")
             time.sleep(5)
 
-threading.Thread(target=tg_polling,daemon=True).start()
+threading.Thread(target=tg_polling, daemon=True).start()
 
-# ==================== ОНЛАЙН СТАТУС ВОДИТЕЛЯ ====================
+# ==================== API ВОДИТЕЛЯ (APK) ====================
 
-@app.route("/api/driver/heartbeat", methods=["POST"])
-def api_heartbeat():
-    """Водитель каждые 30 сек отправляет сигнал"""
+@app.route("/api/login", methods=["POST"])
+def api_login():
     try:
         data = request.json or {}
         car  = data.get("car_number", "").strip().upper()
+        pin  = data.get("pin", "").strip()
         ok, err = validate_car_number(car)
-        if not ok:
-            return jsonify({"ok": False, "error": err})
-
-        with db_lock:
-            conn = get_db()
-            # Обновить время последнего онлайна
-            conn.execute(
-                """UPDATE drivers 
-                SET last_seen=?, status=CASE 
-                    WHEN status='offline' THEN 'free' 
-                    ELSE status END
-                WHERE car_number=?""",
-                (time.time(), car)
-            )
-            conn.commit()
-            
-            # Получить текущий заказ
-            order = conn.execute(
-                "SELECT * FROM orders WHERE car_number=? AND status='pending'",
-                (car,)
-            ).fetchone()
-            
-            driver = conn.execute(
-                "SELECT * FROM drivers WHERE car_number=?", (car,)
-            ).fetchone()
-            conn.close()
-
+        if not ok: return jsonify({"ok": False, "error": err})
+        if not pin or len(pin) != 4:
+            return jsonify({"ok": False, "error": "Неверный ПИН"})
+        conn   = get_db()
+        driver = conn.execute(
+            "SELECT * FROM drivers WHERE car_number=? AND pin=?",
+            (car, pin)).fetchone()
+        conn.close()
+        if not driver:
+            return jsonify({"ok": False, "error": "Неверный номер или ПИН"})
+        add_log("driver_login", car, "Вход водителя")
         return jsonify({
             "ok": True,
-            "status": driver["status"] if driver else "free",
-            "balance": driver["balance"] if driver else 0,
-            "active_order": dict(order) if order else None
+            "driver": {
+                "car_number": driver["car_number"],
+                "name":       driver["name"],
+                "phone":      driver["phone"],
+                "balance":    driver["balance"],
+                "status":     driver["status"]
+            }
         })
-    except Exception as e:
-        logger.error(f"heartbeat error: {e}")
-        return jsonify({"ok": False, "error": str(e)})
-
-@app.route("/api/driver/go_offline", methods=["POST"])
-def api_go_offline():
-    """Водитель уходит офлайн"""
-    try:
-        data = request.json or {}
-        car  = data.get("car_number", "").strip().upper()
-        ok, err = validate_car_number(car)
-        if not ok:
-            return jsonify({"ok": False, "error": err})
-
-        with db_lock:
-            conn = get_db()
-            conn.execute(
-                "UPDATE drivers SET status='offline' WHERE car_number=?",
-                (car,)
-            )
-            conn.commit()
-            conn.close()
-
-        add_log("go_offline", car, "Водитель ушёл офлайн")
-        return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/driver/go_online", methods=["POST"])
 def api_go_online():
-    """Водитель выходит онлайн"""
     try:
         data = request.json or {}
         car  = data.get("car_number", "").strip().upper()
         pin  = data.get("pin", "").strip()
-
         ok, err = validate_car_number(car)
-        if not ok:
-            return jsonify({"ok": False, "error": err})
-
-        conn = get_db()
+        if not ok: return jsonify({"ok": False, "error": err})
+        conn   = get_db()
         driver = conn.execute(
             "SELECT * FROM drivers WHERE car_number=? AND pin=?",
-            (car, pin)
-        ).fetchone()
+            (car, pin)).fetchone()
         conn.close()
-
         if not driver:
             return jsonify({"ok": False, "error": "Неверный номер или ПИН"})
-
         with db_lock:
             conn = get_db()
             conn.execute(
-                "UPDATE drivers SET status='free', last_seen=? WHERE car_number=?",
-                (time.time(), car)
-            )
+                "UPDATE drivers SET status='free',last_seen=? WHERE car_number=?",
+                (time.time(), car))
             conn.commit()
             conn.close()
-
         add_log("go_online", car, "Водитель вышел онлайн")
-        tg_send(f"🟢 Водитель <b>{car}</b> — {driver['name']} вышел онлайн!")
+        tg_send(f"🟢 <b>{driver['name']}</b> ({car}) вышел онлайн!")
         return jsonify({
             "ok": True,
             "driver": {
@@ -882,465 +921,611 @@ def api_go_online():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/driver/order_status", methods=["POST"])
-def api_driver_order_status():
-    """Водитель получает свой текущий заказ"""
+@app.route("/api/driver/go_offline", methods=["POST"])
+def api_go_offline():
     try:
         data = request.json or {}
         car  = data.get("car_number", "").strip().upper()
         ok, err = validate_car_number(car)
-        if not ok:
-            return jsonify({"ok": False, "error": err})
+        if not ok: return jsonify({"ok": False, "error": err})
+        with db_lock:
+            conn = get_db()
+            conn.execute(
+                "UPDATE drivers SET status='offline',last_seen=0 WHERE car_number=?",
+                (car,))
+            conn.commit()
+            conn.close()
+        add_log("go_offline", car, "Водитель ушёл офлайн")
+        tg_send(f"⚫ Водитель <b>{car}</b> ушёл офлайн")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
-        conn = get_db()
-        order = conn.execute(
-            "SELECT * FROM orders WHERE car_number=? AND status='pending'",
-            (car,)
-        ).fetchone()
-        driver = conn.execute(
-            "SELECT balance, status FROM drivers WHERE car_number=?",
-            (car,)
-        ).fetchone()
-        
-        # Непрочитанные сообщения чата
-        messages = conn.execute(
-            """SELECT * FROM chat_messages 
-            WHERE car_number=? 
-            ORDER BY created_at DESC LIMIT 5""",
-            (car,)
-        ).fetchall()
-        conn.close()
-
+@app.route("/api/driver/heartbeat", methods=["POST"])
+def api_heartbeat():
+    try:
+        data = request.json or {}
+        car  = data.get("car_number", "").strip().upper()
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        with db_lock:
+            conn = get_db()
+            conn.execute(
+                """UPDATE drivers SET last_seen=?,
+                status=CASE WHEN status='offline' THEN 'free' ELSE status END
+                WHERE car_number=?""",
+                (time.time(), car))
+            conn.commit()
+            order  = conn.execute(
+                "SELECT * FROM orders WHERE car_number=? AND status='pending'",
+                (car,)).fetchone()
+            driver = conn.execute(
+                "SELECT * FROM drivers WHERE car_number=?", (car,)).fetchone()
+            msgs = conn.execute(
+                """SELECT * FROM chat_messages WHERE car_number=?
+                ORDER BY created_at DESC LIMIT 5""",
+                (car,)).fetchall()
+            conn.close()
         return jsonify({
-            "ok":          True,
+            "ok":           True,
+            "status":       driver["status"] if driver else "free",
+            "balance":      driver["balance"] if driver else 0,
             "active_order": dict(order) if order else None,
-            "balance":     driver["balance"] if driver else 0,
-            "status":      driver["status"] if driver else "offline",
-            "messages":    [dict(m) for m in messages]
+            "messages":     [dict(m) for m in msgs]
+        })
+    except Exception as e:
+        logger.error(f"heartbeat error: {e}")
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/driver/order_status", methods=["POST"])
+def api_driver_order_status():
+    try:
+        data = request.json or {}
+        car  = data.get("car_number", "").strip().upper()
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        conn   = get_db()
+        order  = conn.execute(
+            "SELECT * FROM orders WHERE car_number=? AND status='pending'",
+            (car,)).fetchone()
+        driver = conn.execute(
+            "SELECT balance,status FROM drivers WHERE car_number=?",
+            (car,)).fetchone()
+        msgs   = conn.execute(
+            """SELECT * FROM chat_messages WHERE car_number=?
+            ORDER BY created_at DESC LIMIT 10""",
+            (car,)).fetchall()
+        conn.close()
+        return jsonify({
+            "ok":           True,
+            "active_order": dict(order) if order else None,
+            "balance":      driver["balance"] if driver else 0,
+            "status":       driver["status"] if driver else "offline",
+            "messages":     [dict(m) for m in msgs]
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
-# ==================== API ====================
+@app.route("/api/orders/driver_cancel/<int:order_id>", methods=["POST"])
+def api_driver_cancel(order_id):
+    try:
+        data   = request.json or {}
+        car    = data.get("car_number", "").strip().upper()
+        reason = data.get("reason", "Отменён водителем")
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        conn  = get_db()
+        order = conn.execute(
+            "SELECT * FROM orders WHERE id=? AND car_number=?",
+            (order_id, car)).fetchone()
+        conn.close()
+        if not order:
+            return jsonify({"ok": False, "error": "Заказ не найден"})
+        ok, msg = cancel_order_db(order_id, reason)
+        if ok:
+            tg_send(
+                f"⚠️ Водитель <b>{car}</b> отменил заказ #{order_id}\n"
+                f"Причина: {reason}")
+        return jsonify({"ok": ok, "message": msg})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    try:
+        data  = request.json or {}
+        name  = data.get("name", "").strip()
+        car   = data.get("car_number", "").strip().upper()
+        phone = data.get("phone", "").strip()
+        ok, err = validate_name(name)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_phone(phone)
+        if not ok: return jsonify({"ok": False, "error": err})
+        conn     = get_db()
+        existing = conn.execute(
+            "SELECT car_number FROM drivers WHERE car_number=?", (car,)).fetchone()
+        conn.close()
+        if existing:
+            return jsonify({"ok": False, "error": "Водитель уже зарегистрирован"})
+        pin    = str(random.randint(1000, 9999))
+        pin_id = f"{car}_{int(time.time())}"
+        with db_lock:
+            conn = get_db()
+            conn.execute(
+                """INSERT INTO pending_pins
+                (id,name,car_number,phone,pin,status,created_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (pin_id, name, car, phone, pin, "pending", time.time()))
+            conn.commit()
+            conn.close()
+        tg_notify_new_pin(pin_id, name, car, phone, pin)
+        add_log("register", car, f"Заявка: {name} | {phone}")
+        return jsonify({"ok": True, "message": "Заявка отправлена. Ожидайте ПИН-код"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+# ==================== API ПАНЕЛИ ====================
+
 @app.route("/api/stats")
 @login_required
 def api_stats():
     try:
-        conn=get_db()
-        online=conn.execute("SELECT COUNT(*) FROM drivers WHERE status!='offline'").fetchone()[0]
-        free=conn.execute("SELECT COUNT(*) FROM drivers WHERE status='free'").fetchone()[0]
-        busy=conn.execute("SELECT COUNT(*) FROM drivers WHERE status='busy'").fetchone()[0]
-        total=conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
-        pending=conn.execute("SELECT COUNT(*) FROM pending_pins WHERE status='pending'").fetchone()[0]
-        active=conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
-        revenue=conn.execute("SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'").fetchone()[0]
-        today=conn.execute(
-            "SELECT COUNT(*) FROM orders WHERE created_at>?",(time.time()-86400,)).fetchone()[0]
+        conn    = get_db()
+        online  = conn.execute("SELECT COUNT(*) FROM drivers WHERE status!='offline'").fetchone()[0]
+        free    = conn.execute("SELECT COUNT(*) FROM drivers WHERE status='free'").fetchone()[0]
+        busy    = conn.execute("SELECT COUNT(*) FROM drivers WHERE status='busy'").fetchone()[0]
+        total   = conn.execute("SELECT COUNT(*) FROM drivers").fetchone()[0]
+        pending = conn.execute("SELECT COUNT(*) FROM pending_pins WHERE status='pending'").fetchone()[0]
+        active  = conn.execute("SELECT COUNT(*) FROM orders WHERE status='pending'").fetchone()[0]
+        revenue = conn.execute("SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'").fetchone()[0]
+        today   = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE created_at>?",
+            (time.time() - 86400,)).fetchone()[0]
         conn.close()
-        return jsonify({"ok":True,"stats":{
-            "online":online,"free":free,"busy":busy,"total":total,
-            "pending_pins":pending,"active_orders":active,
-            "revenue":revenue,"today_orders":today}})
+        return jsonify({"ok": True, "stats": {
+            "online":        online,
+            "free":          free,
+            "busy":          busy,
+            "total":         total,
+            "pending_pins":  pending,
+            "active_orders": active,
+            "revenue":       revenue,
+            "today_orders":  today
+        }})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/drivers")
 @login_required
 def api_drivers():
     try:
-        conn=get_db()
-        rows=conn.execute("SELECT * FROM drivers ORDER BY status").fetchall()
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT * FROM drivers ORDER BY status").fetchall()
         conn.close()
-        result=[]
+        result = []
         for d in rows:
-            r=get_rating_db(d["car_number"])
-            result.append({"car_number":d["car_number"],"name":d["name"],
-                "phone":d["phone"],"status":d["status"],"balance":d["balance"],
-                "rating":r["avg"],"orders":r["orders"],"rating_count":r["count"]})
-        return jsonify({"ok":True,"drivers":result})
+            r = get_rating_db(d["car_number"])
+            result.append({
+                "car_number":   d["car_number"],
+                "name":         d["name"],
+                "phone":        d["phone"],
+                "status":       d["status"],
+                "balance":      d["balance"],
+                "rating":       r["avg"],
+                "orders":       r["orders"],
+                "rating_count": r["count"],
+                "last_seen":    d["last_seen"]
+            })
+        return jsonify({"ok": True, "drivers": result})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/drivers/online")
 @login_required
 def api_drivers_online():
     try:
-        conn=get_db()
-        rows=conn.execute(
+        conn = get_db()
+        rows = conn.execute(
             "SELECT * FROM drivers WHERE status!='offline' ORDER BY status").fetchall()
         conn.close()
-        result=[]
+        result = []
         for d in rows:
-            r=get_rating_db(d["car_number"])
-            result.append({"car_number":d["car_number"],"name":d["name"],
-                "phone":d["phone"],"status":d["status"],"balance":d["balance"],
-                "rating":r["avg"],"orders":r["orders"]})
-        return jsonify({"ok":True,"drivers":result})
+            r = get_rating_db(d["car_number"])
+            result.append({
+                "car_number": d["car_number"],
+                "name":       d["name"],
+                "phone":      d["phone"],
+                "status":     d["status"],
+                "balance":    d["balance"],
+                "rating":     r["avg"],
+                "orders":     r["orders"]
+            })
+        return jsonify({"ok": True, "drivers": result})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/driver/<car_number>")
 @login_required
 def api_driver_info(car_number):
     try:
-        conn=get_db()
-        d=conn.execute("SELECT * FROM drivers WHERE car_number=?",(car_number,)).fetchone()
+        conn   = get_db()
+        d      = conn.execute(
+            "SELECT * FROM drivers WHERE car_number=?", (car_number,)).fetchone()
         if not d:
             conn.close()
-            return jsonify({"ok":False,"error":"Не найден"})
-        order=conn.execute(
-            "SELECT * FROM orders WHERE car_number=? AND status='pending'",(car_number,)).fetchone()
-        shift=conn.execute(
-            "SELECT * FROM shifts WHERE car_number=? AND end_time IS NULL",(car_number,)).fetchone()
-        orders=conn.execute(
+            return jsonify({"ok": False, "error": "Не найден"})
+        order  = conn.execute(
+            "SELECT * FROM orders WHERE car_number=? AND status='pending'",
+            (car_number,)).fetchone()
+        shift  = conn.execute(
+            "SELECT * FROM shifts WHERE car_number=? AND end_time IS NULL",
+            (car_number,)).fetchone()
+        orders = conn.execute(
             "SELECT * FROM orders WHERE car_number=? ORDER BY created_at DESC LIMIT 10",
             (car_number,)).fetchall()
         conn.close()
-        r=get_rating_db(car_number)
-        return jsonify({"ok":True,
-            "driver":{"car_number":d["car_number"],"name":d["name"],
-                "phone":d["phone"],"status":d["status"],"balance":d["balance"],
-                "rating":r["avg"],"orders":r["orders"],"rating_count":r["count"]},
-            "active_order":dict(order) if order else None,
-            "active_shift":dict(shift) if shift else None,
-            "recent_orders":[dict(o) for o in orders]})
+        r = get_rating_db(car_number)
+        return jsonify({
+            "ok": True,
+            "driver": {
+                "car_number":   d["car_number"],
+                "name":         d["name"],
+                "phone":        d["phone"],
+                "status":       d["status"],
+                "balance":      d["balance"],
+                "rating":       r["avg"],
+                "orders":       r["orders"],
+                "rating_count": r["count"]
+            },
+            "active_order":  dict(order) if order else None,
+            "active_shift":  dict(shift) if shift else None,
+            "recent_orders": [dict(o) for o in orders]
+        })
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/orders")
 @login_required
 def api_orders():
     try:
-        status=request.args.get("status","all")
-        conn=get_db()
-        if status=="all":
-            rows=conn.execute(
+        status = request.args.get("status", "all")
+        conn   = get_db()
+        if status == "all":
+            rows = conn.execute(
                 "SELECT * FROM orders ORDER BY created_at DESC LIMIT 100").fetchall()
         else:
-            rows=conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM orders WHERE status=? ORDER BY created_at DESC LIMIT 100",
                 (status,)).fetchall()
         conn.close()
-        return jsonify({"ok":True,"orders":[dict(o) for o in rows]})
+        return jsonify({"ok": True, "orders": [dict(o) for o in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/orders/create",methods=["POST"])
+@app.route("/api/orders/create", methods=["POST"])
 @login_required
 def api_create_order():
     try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        from_addr=data.get("from_address","").strip()
-        to_addr=data.get("to_address","").strip()
-        price=data.get("price",0)
-        client=data.get("client","Диспетчер").strip()
-        if car!="ALL":
-            ok,err=validate_car_number(car)
-            if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_address(from_addr)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_address(to_addr)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_price(price)
-        if not ok: return jsonify({"ok":False,"error":err})
-        if car=="ALL":
-            conn=get_db()
-            free=conn.execute("SELECT car_number FROM drivers WHERE status='free'").fetchall()
+        data      = request.json or {}
+        car       = data.get("car_number", "").strip().upper()
+        from_addr = data.get("from_address", "").strip()
+        to_addr   = data.get("to_address", "").strip()
+        price     = data.get("price", 0)
+        client    = data.get("client", "Диспетчер").strip()
+        if car != "ALL":
+            ok, err = validate_car_number(car)
+            if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_address(from_addr)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_address(to_addr)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_price(price)
+        if not ok: return jsonify({"ok": False, "error": err})
+        if car == "ALL":
+            conn = get_db()
+            free = conn.execute(
+                "SELECT car_number FROM drivers WHERE status='free'").fetchall()
             conn.close()
-            ids=[]
+            ids = []
             for d in free:
-                oid,_=create_order_db(d["car_number"],from_addr,to_addr,int(price),client)
+                oid, _ = create_order_db(
+                    d["car_number"], from_addr, to_addr, int(price), client)
                 if oid: ids.append(oid)
-            return jsonify({"ok":True,"order_ids":ids,"message":f"Отправлено {len(ids)} водителям"})
-        oid,err=create_order_db(car,from_addr,to_addr,int(price),client)
-        if oid: return jsonify({"ok":True,"order_id":oid})
-        return jsonify({"ok":False,"error":err})
+            return jsonify({
+                "ok":      True,
+                "order_ids": ids,
+                "message": f"Отправлено {len(ids)} водителям"
+            })
+        oid, err = create_order_db(car, from_addr, to_addr, int(price), client)
+        if oid: return jsonify({"ok": True, "order_id": oid})
+        return jsonify({"ok": False, "error": err})
     except Exception as e:
         logger.error(f"api_create_order error: {e}")
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/orders/complete/<int:order_id>",methods=["POST"])
+@app.route("/api/orders/complete/<int:order_id>", methods=["POST"])
 @login_required
 def api_complete_order(order_id):
-    ok,msg=complete_order_db(order_id)
-    return jsonify({"ok":ok,"message":msg})
+    ok, msg = complete_order_db(order_id)
+    return jsonify({"ok": ok, "message": msg})
 
-@app.route("/api/orders/cancel/<int:order_id>",methods=["POST"])
+@app.route("/api/orders/cancel/<int:order_id>", methods=["POST"])
 @login_required
 def api_cancel_order(order_id):
-    data=request.json or {}
-    reason=data.get("reason","Отменён диспетчером")
-    ok,msg=cancel_order_db(order_id,reason)
-    return jsonify({"ok":ok,"message":msg})
+    data   = request.json or {}
+    reason = data.get("reason", "Отменён диспетчером")
+    ok, msg = cancel_order_db(order_id, reason)
+    return jsonify({"ok": ok, "message": msg})
 
-@app.route("/api/orders/driver_cancel/<int:order_id>",methods=["POST"])
-def api_driver_cancel(order_id):
-    try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        reason=data.get("reason","Отменён водителем")
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        conn=get_db()
-        order=conn.execute(
-            "SELECT * FROM orders WHERE id=? AND car_number=?",(order_id,car)).fetchone()
-        conn.close()
-        if not order: return jsonify({"ok":False,"error":"Заказ не найден"})
-        ok,msg=cancel_order_db(order_id,reason)
-        if ok: tg_send(f"⚠️ Водитель <b>{car}</b> отменил заказ #{order_id}\nПричина: {reason}")
-        return jsonify({"ok":ok,"message":msg})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
-
-@app.route("/api/shift/start",methods=["POST"])
+@app.route("/api/shift/start", methods=["POST"])
 @login_required
 def api_shift_start():
-    data=request.json or {}
-    car=data.get("car_number","").strip().upper()
-    ok,err=validate_car_number(car)
-    if not ok: return jsonify({"ok":False,"error":err})
-    ok,msg=start_shift(car)
-    return jsonify({"ok":ok,"message":msg})
+    data = request.json or {}
+    car  = data.get("car_number", "").strip().upper()
+    ok, err = validate_car_number(car)
+    if not ok: return jsonify({"ok": False, "error": err})
+    ok, msg = start_shift(car)
+    return jsonify({"ok": ok, "message": msg})
 
-@app.route("/api/shift/end",methods=["POST"])
+@app.route("/api/shift/end", methods=["POST"])
 @login_required
 def api_shift_end():
-    data=request.json or {}
-    car=data.get("car_number","").strip().upper()
-    ok,err=validate_car_number(car)
-    if not ok: return jsonify({"ok":False,"error":err})
-    ok,msg=end_shift(car)
-    return jsonify({"ok":ok,"message":msg})
+    data = request.json or {}
+    car  = data.get("car_number", "").strip().upper()
+    ok, err = validate_car_number(car)
+    if not ok: return jsonify({"ok": False, "error": err})
+    ok, msg = end_shift(car)
+    return jsonify({"ok": ok, "message": msg})
 
 @app.route("/api/shifts")
 @login_required
 def api_shifts():
     try:
-        conn=get_db()
-        rows=conn.execute(
+        conn = get_db()
+        rows = conn.execute(
             """SELECT s.*,d.name FROM shifts s
             LEFT JOIN drivers d ON s.car_number=d.car_number
             ORDER BY s.start_time DESC LIMIT 50""").fetchall()
         conn.close()
-        return jsonify({"ok":True,"shifts":[dict(r) for r in rows]})
+        return jsonify({"ok": True, "shifts": [dict(r) for r in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/pins")
 @login_required
 def api_pins():
     try:
-        conn=get_db()
-        rows=conn.execute(
+        conn = get_db()
+        rows = conn.execute(
             "SELECT * FROM pending_pins ORDER BY created_at DESC").fetchall()
         conn.close()
-        return jsonify({"ok":True,"pins":[dict(r) for r in rows]})
+        return jsonify({"ok": True, "pins": [dict(r) for r in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/pins/approve/<pin_id>",methods=["POST"])
+@app.route("/api/pins/approve/<pin_id>", methods=["POST"])
 @login_required
 def api_approve_pin(pin_id):
     try:
         with db_lock:
-            conn=get_db()
-            row=conn.execute(
-                "SELECT * FROM pending_pins WHERE id=?",(pin_id,)).fetchone()
+            conn = get_db()
+            row  = conn.execute(
+                "SELECT * FROM pending_pins WHERE id=?", (pin_id,)).fetchone()
             if not row:
                 conn.close()
-                return jsonify({"ok":False,"error":"Не найдена"})
-            if row["status"]!="pending":
+                return jsonify({"ok": False, "error": "Не найдена"})
+            if row["status"] != "pending":
                 conn.close()
-                return jsonify({"ok":False,"error":"Уже обработана"})
-            conn.execute("UPDATE pending_pins SET status='approved' WHERE id=?",(pin_id,))
+                return jsonify({"ok": False, "error": "Уже обработана"})
+            conn.execute(
+                "UPDATE pending_pins SET status='approved' WHERE id=?", (pin_id,))
             conn.execute(
                 """INSERT OR IGNORE INTO drivers
-                (car_number,name,phone,pin,balance,status,created_at)
-                VALUES (?,?,?,?,50000,'offline',?)""",
-                (row["car_number"],row["name"],row["phone"],row["pin"],time.time()))
+                (car_number,name,phone,pin,balance,status,last_seen,created_at)
+                VALUES (?,?,?,?,50000,'offline',0,?)""",
+                (row["car_number"], row["name"],
+                 row["phone"], row["pin"], time.time()))
             conn.commit()
             conn.close()
-        add_log("approve_pin",row["car_number"],f"Одобрен: {row['name']}")
-        tg_notify_approved(row["name"],row["car_number"],row["pin"])
-        return jsonify({"ok":True,"message":"Водитель одобрен"})
+        add_log("approve_pin", row["car_number"], f"Одобрен: {row['name']}")
+        tg_notify_approved(row["name"], row["car_number"], row["pin"])
+        return jsonify({"ok": True, "message": "Водитель одобрен"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/pins/reject/<pin_id>",methods=["POST"])
+@app.route("/api/pins/reject/<pin_id>", methods=["POST"])
 @login_required
 def api_reject_pin(pin_id):
     try:
         with db_lock:
-            conn=get_db()
-            row=conn.execute(
-                "SELECT * FROM pending_pins WHERE id=?",(pin_id,)).fetchone()
+            conn = get_db()
+            row  = conn.execute(
+                "SELECT * FROM pending_pins WHERE id=?", (pin_id,)).fetchone()
             if not row:
                 conn.close()
-                return jsonify({"ok":False,"error":"Не найдена"})
-            conn.execute("UPDATE pending_pins SET status='rejected' WHERE id=?",(pin_id,))
+                return jsonify({"ok": False, "error": "Не найдена"})
+            conn.execute(
+                "UPDATE pending_pins SET status='rejected' WHERE id=?", (pin_id,))
             conn.commit()
             conn.close()
-        add_log("reject_pin",row["car_number"],f"Отклонён: {row['name']}")
-        tg_notify_rejected(row["name"],row["car_number"])
-        return jsonify({"ok":True,"message":"Отклонено"})
+        add_log("reject_pin", row["car_number"], f"Отклонён: {row['name']}")
+        tg_notify_rejected(row["name"], row["car_number"])
+        return jsonify({"ok": True, "message": "Отклонено"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/balance/requests")
 @login_required
 def api_balance_requests():
     try:
-        conn=get_db()
-        rows=conn.execute(
+        conn = get_db()
+        rows = conn.execute(
             "SELECT * FROM balance_requests ORDER BY created_at DESC LIMIT 50").fetchall()
         conn.close()
-        return jsonify({"ok":True,"requests":[dict(r) for r in rows]})
+        return jsonify({"ok": True, "requests": [dict(r) for r in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/balance/request",methods=["POST"])
+@app.route("/api/balance/request", methods=["POST"])
 def api_balance_request():
     try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        amount=data.get("amount",0)
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_amount(amount)
-        if not ok: return jsonify({"ok":False,"error":err})
+        data   = request.json or {}
+        car    = data.get("car_number", "").strip().upper()
+        amount = data.get("amount", 0)
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_amount(amount)
+        if not ok: return jsonify({"ok": False, "error": err})
         with db_lock:
-            conn=get_db()
-            cur=conn.execute(
-                "INSERT INTO balance_requests (car_number,amount,status,created_at) VALUES (?,?,?,?)",
-                (car,int(amount),"pending",time.time()))
-            req_id=cur.lastrowid
+            conn = get_db()
+            cur  = conn.execute(
+                """INSERT INTO balance_requests
+                (car_number,amount,status,created_at) VALUES (?,?,?,?)""",
+                (car, int(amount), "pending", time.time()))
+            req_id = cur.lastrowid
             conn.commit()
             conn.close()
-        tg_notify_balance_request(req_id,car,int(amount))
-        add_log("balance_request",car,f"Заявка: {int(amount):,} сум")
-        return jsonify({"ok":True,"message":"Заявка отправлена"})
+        tg_notify_balance_request(req_id, car, int(amount))
+        add_log("balance_request", car, f"Заявка: {int(amount):,} сум")
+        return jsonify({"ok": True, "message": "Заявка отправлена"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/balance/approve/<int:req_id>",methods=["POST"])
+@app.route("/api/balance/approve/<int:req_id>", methods=["POST"])
 @login_required
 def api_approve_balance(req_id):
     try:
         with db_lock:
-            conn=get_db()
-            row=conn.execute(
-                "SELECT * FROM balance_requests WHERE id=?",(req_id,)).fetchone()
-            if not row or row["status"]!="pending":
+            conn = get_db()
+            row  = conn.execute(
+                "SELECT * FROM balance_requests WHERE id=?", (req_id,)).fetchone()
+            if not row or row["status"] != "pending":
                 conn.close()
-                return jsonify({"ok":False,"error":"Не найдена или уже обработана"})
-            car=row["car_number"]
-            amount=row["amount"]
-            conn.execute("UPDATE drivers SET balance=balance+? WHERE car_number=?",(amount,car))
-            conn.execute("UPDATE balance_requests SET status='approved' WHERE id=?",(req_id,))
+                return jsonify({"ok": False, "error": "Не найдена или уже обработана"})
+            car    = row["car_number"]
+            amount = row["amount"]
             conn.execute(
-                "INSERT INTO transactions (car_number,amount,type,comment,created_at) VALUES (?,?,?,?,?)",
-                (car,amount,"deposit","Пополнение одобрено",time.time()))
-            new_b=conn.execute(
-                "SELECT balance FROM drivers WHERE car_number=?",(car,)).fetchone()["balance"]
+                "UPDATE drivers SET balance=balance+? WHERE car_number=?",
+                (amount, car))
+            conn.execute(
+                "UPDATE balance_requests SET status='approved' WHERE id=?", (req_id,))
+            conn.execute(
+                """INSERT INTO transactions
+                (car_number,amount,type,comment,created_at) VALUES (?,?,?,?,?)""",
+                (car, amount, "deposit", "Пополнение одобрено", time.time()))
+            new_b = conn.execute(
+                "SELECT balance FROM drivers WHERE car_number=?",
+                (car,)).fetchone()["balance"]
             conn.commit()
             conn.close()
-        add_log("balance_approve",car,f"{amount:,} сум → {new_b:,} сум")
+        add_log("balance_approve", car, f"{amount:,} сум → {new_b:,} сум")
         tg_send(f"✅ Баланс <b>{car}</b> пополнен!\n💰 <b>{new_b:,} сум</b>")
-        return jsonify({"ok":True,"new_balance":new_b})
+        return jsonify({"ok": True, "new_balance": new_b})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/balance/reject/<int:req_id>",methods=["POST"])
+@app.route("/api/balance/reject/<int:req_id>", methods=["POST"])
 @login_required
 def api_reject_balance(req_id):
     try:
         with db_lock:
-            conn=get_db()
-            row=conn.execute(
-                "SELECT * FROM balance_requests WHERE id=?",(req_id,)).fetchone()
+            conn = get_db()
+            row  = conn.execute(
+                "SELECT * FROM balance_requests WHERE id=?", (req_id,)).fetchone()
             if not row:
                 conn.close()
-                return jsonify({"ok":False,"error":"Не найдена"})
-            conn.execute("UPDATE balance_requests SET status='rejected' WHERE id=?",(req_id,))
+                return jsonify({"ok": False, "error": "Не найдена"})
+            conn.execute(
+                "UPDATE balance_requests SET status='rejected' WHERE id=?", (req_id,))
             conn.commit()
             conn.close()
-        add_log("balance_reject",row["car_number"],f"Отклонено: {row['amount']:,} сум")
-        return jsonify({"ok":True,"message":"Отклонено"})
+        add_log("balance_reject", row["car_number"],
+                f"Отклонено: {row['amount']:,} сум")
+        return jsonify({"ok": True, "message": "Отклонено"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/balance/add",methods=["POST"])
+@app.route("/api/balance/add", methods=["POST"])
 @login_required
 def api_balance_add():
     try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        amount=data.get("amount",0)
-        comment=data.get("comment","Ручное пополнение")
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_amount(abs(int(amount)))
-        if not ok: return jsonify({"ok":False,"error":err})
-        new_b=update_balance_db(car,int(amount),"manual",comment)
-        return jsonify({"ok":True,"new_balance":new_b})
+        data    = request.json or {}
+        car     = data.get("car_number", "").strip().upper()
+        amount  = data.get("amount", 0)
+        comment = data.get("comment", "Ручное пополнение")
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_amount(abs(int(amount)))
+        if not ok: return jsonify({"ok": False, "error": err})
+        new_b = update_balance_db(car, int(amount), "manual", comment)
+        return jsonify({"ok": True, "new_balance": new_b})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/rating")
 @login_required
 def api_rating():
     try:
-        conn=get_db()
-        rows=conn.execute(
-            """SELECT r.car_number,ROUND(AVG(r.stars),1) as avg,COUNT(r.id) as cnt,d.name,
-            (SELECT COUNT(*) FROM orders o WHERE o.car_number=r.car_number AND o.status='completed') as orders
-            FROM ratings r LEFT JOIN drivers d ON r.car_number=d.car_number
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT r.car_number,ROUND(AVG(r.stars),1) as avg,
+            COUNT(r.id) as cnt,d.name,
+            (SELECT COUNT(*) FROM orders o
+             WHERE o.car_number=r.car_number AND o.status='completed') as orders
+            FROM ratings r
+            LEFT JOIN drivers d ON r.car_number=d.car_number
             GROUP BY r.car_number ORDER BY avg DESC""").fetchall()
         conn.close()
-        return jsonify({"ok":True,"ratings":[dict(r) for r in rows]})
+        return jsonify({"ok": True, "ratings": [dict(r) for r in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/rating/add",methods=["POST"])
+@app.route("/api/rating/add", methods=["POST"])
 @login_required
 def api_add_rating():
     try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        stars=data.get("stars",5)
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_stars(stars)
-        if not ok: return jsonify({"ok":False,"error":err})
-        add_rating_db(car,int(stars))
-        return jsonify({"ok":True,"message":"Оценка добавлена"})
+        data  = request.json or {}
+        car   = data.get("car_number", "").strip().upper()
+        stars = data.get("stars", 5)
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        ok, err = validate_stars(stars)
+        if not ok: return jsonify({"ok": False, "error": err})
+        add_rating_db(car, int(stars))
+        return jsonify({"ok": True, "message": "Оценка добавлена"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/tariffs")
 @login_required
 def api_tariffs():
     try:
-        conn=get_db()
-        rows=conn.execute("SELECT * FROM tariffs").fetchall()
+        conn = get_db()
+        rows = conn.execute("SELECT * FROM tariffs").fetchall()
         conn.close()
-        result={}
+        result = {}
         for r in rows:
-            result[r["zone"]]={"name":r["name"],"base_fare":r["base_fare"],
-                "rate_per_km":r["rate_per_km"],"wait_rate":r["wait_rate"]}
-        return jsonify({"ok":True,"tariffs":result})
+            result[r["zone"]] = {
+                "name":        r["name"],
+                "base_fare":   r["base_fare"],
+                "rate_per_km": r["rate_per_km"],
+                "wait_rate":   r["wait_rate"]
+            }
+        return jsonify({"ok": True, "tariffs": result})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/tariffs/update",methods=["POST"])
+@app.route("/api/tariffs/update", methods=["POST"])
 @login_required
 def api_update_tariffs():
     try:
-        data=request.json or {}
+        data = request.json or {}
         with db_lock:
-            conn=get_db()
-            for zone,vals in data.items():
+            conn = get_db()
+            for zone, vals in data.items():
                 conn.execute(
                     """INSERT INTO tariffs (zone,base_fare,rate_per_km,wait_rate)
                     VALUES (?,?,?,?)
@@ -1348,180 +1533,155 @@ def api_update_tariffs():
                     base_fare=excluded.base_fare,
                     rate_per_km=excluded.rate_per_km,
                     wait_rate=excluded.wait_rate""",
-                    (zone,vals.get("base_fare",5000),
-                     vals.get("rate_per_km",2800),vals.get("wait_rate",500)))
+                    (zone,
+                     vals.get("base_fare", 5000),
+                     vals.get("rate_per_km", 2800),
+                     vals.get("wait_rate", 500)))
             conn.commit()
             conn.close()
-        add_log("tariff_update","admin","Тарифы обновлены")
-        return jsonify({"ok":True,"message":"Тарифы сохранены"})
+        add_log("tariff_update", "admin", "Тарифы обновлены")
+        return jsonify({"ok": True, "message": "Тарифы сохранены"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/logs")
 @login_required
 def api_logs():
     try:
-        conn=get_db()
-        rows=conn.execute(
+        conn = get_db()
+        rows = conn.execute(
             "SELECT * FROM logs ORDER BY created_at DESC LIMIT 100").fetchall()
         conn.close()
-        return jsonify({"ok":True,"logs":[dict(r) for r in rows]})
+        return jsonify({"ok": True, "logs": [dict(r) for r in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/chat/<car_number>")
 @login_required
 def api_chat_get(car_number):
     try:
-        conn=get_db()
-        rows=conn.execute(
-            "SELECT * FROM chat_messages WHERE car_number=? ORDER BY created_at ASC LIMIT 100",
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT * FROM chat_messages WHERE car_number=?
+            ORDER BY created_at ASC LIMIT 100""",
             (car_number,)).fetchall()
         conn.close()
-        return jsonify({"ok":True,"messages":[dict(r) for r in rows]})
+        return jsonify({"ok": True, "messages": [dict(r) for r in rows]})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
-@app.route("/api/chat/send",methods=["POST"])
+@app.route("/api/chat/send", methods=["POST"])
 @login_required
 def api_chat_send():
     try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        text=data.get("text","").strip()
-        sender=data.get("sender","admin")
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        if not text or len(text)>500:
-            return jsonify({"ok":False,"error":"Неверное сообщение"})
+        data   = request.json or {}
+        car    = data.get("car_number", "").strip().upper()
+        text   = data.get("text", "").strip()
+        sender = data.get("sender", "admin")
+        ok, err = validate_car_number(car)
+        if not ok: return jsonify({"ok": False, "error": err})
+        if not text or len(text) > 500:
+            return jsonify({"ok": False, "error": "Неверное сообщение"})
         with db_lock:
-            conn=get_db()
+            conn = get_db()
             conn.execute(
-                "INSERT INTO chat_messages (car_number,text,sender,created_at) VALUES (?,?,?,?)",
-                (car,text,sender,time.time()))
+                """INSERT INTO chat_messages
+                (car_number,text,sender,created_at) VALUES (?,?,?,?)""",
+                (car, text, sender, time.time()))
             conn.commit()
             conn.close()
-        if sender=="admin":
+        if sender == "admin":
             tg_send(f"💬 <b>Диспетчер → {car}</b>\n{text}")
-        return jsonify({"ok":True})
+        return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/finance")
 @login_required
 def api_finance():
     try:
-        conn=get_db()
-        total_rev=conn.execute(
-            "SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'").fetchone()[0]
-        today_rev=conn.execute(
-            "SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed' AND completed_at>?",
-            (time.time()-86400,)).fetchone()[0]
-        completed=conn.execute(
+        conn      = get_db()
+        total_rev = conn.execute(
+            "SELECT COALESCE(SUM(price),0) FROM orders WHERE status='completed'"
+        ).fetchone()[0]
+        today_rev = conn.execute(
+            """SELECT COALESCE(SUM(price),0) FROM orders
+            WHERE status='completed' AND completed_at>?""",
+            (time.time() - 86400,)).fetchone()[0]
+        completed = conn.execute(
             "SELECT COUNT(*) FROM orders WHERE status='completed'").fetchone()[0]
-        avg_price=conn.execute(
-            "SELECT COALESCE(AVG(price),0) FROM orders WHERE status='completed'").fetchone()[0]
-        drivers=conn.execute(
+        avg_price = conn.execute(
+            "SELECT COALESCE(AVG(price),0) FROM orders WHERE status='completed'"
+        ).fetchone()[0]
+        drivers = conn.execute(
             """SELECT o.car_number,d.name,SUM(o.price) as revenue,COUNT(o.id) as orders
             FROM orders o LEFT JOIN drivers d ON o.car_number=d.car_number
-            WHERE o.status='completed' GROUP BY o.car_number ORDER BY revenue DESC""").fetchall()
-        transactions=conn.execute(
+            WHERE o.status='completed'
+            GROUP BY o.car_number ORDER BY revenue DESC""").fetchall()
+        transactions = conn.execute(
             "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 50").fetchall()
         conn.close()
-        return jsonify({"ok":True,"total_revenue":total_rev,"today_revenue":today_rev,
-            "completed_orders":completed,"avg_price":round(avg_price),
-            "drivers":[dict(d) for d in drivers],
-            "transactions":[dict(t) for t in transactions]})
+        return jsonify({
+            "ok":               True,
+            "total_revenue":    total_rev,
+            "today_revenue":    today_rev,
+            "completed_orders": completed,
+            "avg_price":        round(avg_price),
+            "drivers":          [dict(d) for d in drivers],
+            "transactions":     [dict(t) for t in transactions]
+        })
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
-
-@app.route("/api/register",methods=["POST"])
-def api_register():
-    try:
-        data=request.json or {}
-        name=data.get("name","").strip()
-        car=data.get("car_number","").strip().upper()
-        phone=data.get("phone","").strip()
-        ok,err=validate_name(name)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        ok,err=validate_phone(phone)
-        if not ok: return jsonify({"ok":False,"error":err})
-        conn=get_db()
-        existing=conn.execute(
-            "SELECT car_number FROM drivers WHERE car_number=?",(car,)).fetchone()
-        conn.close()
-        if existing: return jsonify({"ok":False,"error":"Водитель уже зарегистрирован"})
-        pin=str(random.randint(1000,9999))
-        pin_id=f"{car}_{int(time.time())}"
-        with db_lock:
-            conn=get_db()
-            conn.execute(
-                "INSERT INTO pending_pins (id,name,car_number,phone,pin,status,created_at) VALUES (?,?,?,?,?,?,?)",
-                (pin_id,name,car,phone,pin,"pending",time.time()))
-            conn.commit()
-            conn.close()
-        tg_notify_new_pin(pin_id,name,car,phone,pin)
-        add_log("register",car,f"Заявка: {name} | {phone}")
-        return jsonify({"ok":True,"message":"Заявка отправлена. Ожидайте ПИН-код"})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
-
-@app.route("/api/login",methods=["POST"])
-def api_login():
-    try:
-        data=request.json or {}
-        car=data.get("car_number","").strip().upper()
-        pin=data.get("pin","").strip()
-        ok,err=validate_car_number(car)
-        if not ok: return jsonify({"ok":False,"error":err})
-        if not pin or len(pin)!=4:
-            return jsonify({"ok":False,"error":"Неверный ПИН"})
-        conn=get_db()
-        driver=conn.execute(
-            "SELECT * FROM drivers WHERE car_number=? AND pin=?",(car,pin)).fetchone()
-        conn.close()
-        if not driver: return jsonify({"ok":False,"error":"Неверный номер или ПИН"})
-        add_log("driver_login",car,"Вход водителя")
-        return jsonify({"ok":True,"driver":{
-            "car_number":driver["car_number"],"name":driver["name"],
-            "phone":driver["phone"],"balance":driver["balance"],"status":driver["status"]}})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 @app.route("/api/export")
 @login_required
 def api_export():
     try:
-        from flask import Response
-        conn=get_db()
-        orders=conn.execute("SELECT * FROM orders ORDER BY created_at DESC").fetchall()
-        drivers=conn.execute("SELECT * FROM drivers").fetchall()
-        shifts=conn.execute(
+        conn    = get_db()
+        orders  = conn.execute(
+            "SELECT * FROM orders ORDER BY created_at DESC").fetchall()
+        drivers = conn.execute("SELECT * FROM drivers").fetchall()
+        shifts  = conn.execute(
             """SELECT s.*,d.name FROM shifts s
             LEFT JOIN drivers d ON s.car_number=d.car_number
             ORDER BY s.start_time DESC""").fetchall()
         conn.close()
-        lines=["="*50,f"ОТЧЁТ TAXI 3042 XAZARASP",
-               f"Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}","="*50,
-               f"\nЗАКАЗЫ ({len(orders)}):"]
+        lines = [
+            "=" * 50,
+            "ОТЧЁТ TAXI 3042 XAZARASP",
+            f"Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            "=" * 50,
+            f"\nЗАКАЗЫ ({len(orders)}):"
+        ]
         for o in orders:
-            lines.append(f"#{o['id']} | {o['car_number']} | {o['from_address']}→{o['to_address']} | {o['price']:,} сум | {o['status']}")
+            lines.append(
+                f"#{o['id']} | {o['car_number']} | "
+                f"{o['from_address']}→{o['to_address']} | "
+                f"{o['price']:,} сум | {o['status']}")
         lines.append(f"\nВОДИТЕЛИ ({len(drivers)}):")
         for d in drivers:
-            lines.append(f"{d['car_number']} | {d['name']} | {d['phone']} | {d['balance']:,} сум")
+            lines.append(
+                f"{d['car_number']} | {d['name']} | "
+                f"{d['phone']} | {d['balance']:,} сум")
         lines.append(f"\nСМЕНЫ ({len(shifts)}):")
         for s in shifts:
-            start=datetime.fromtimestamp(s["start_time"]).strftime("%d.%m %H:%M")
-            end=datetime.fromtimestamp(s["end_time"]).strftime("%H:%M") if s["end_time"] else "▶"
-            lines.append(f"{s['car_number']} | {s['name']or'—'} | {start}→{end} | {s['revenue']:,} сум | {s['orders_count']} заказов")
-        total=sum(o["price"] for o in orders if o["status"]=="completed")
-        lines+=[f"\nИТОГО: {total:,} сум","="*50]
-        return Response("\n".join(lines),mimetype="text/plain",
-            headers={"Content-Disposition":f"attachment;filename=taxi_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"})
+            start = datetime.fromtimestamp(
+                s["start_time"]).strftime("%d.%m %H:%M")
+            end = datetime.fromtimestamp(
+                s["end_time"]).strftime("%H:%M") if s["end_time"] else "▶"
+            lines.append(
+                f"{s['car_number']} | {s['name'] or '—'} | "
+                f"{start}→{end} | {s['revenue']:,} сум | "
+                f"{s['orders_count']} заказов")
+        total = sum(o["price"] for o in orders if o["status"] == "completed")
+        lines += [f"\nИТОГО: {total:,} сум", "=" * 50]
+        return Response(
+            "\n".join(lines),
+            mimetype="text/plain",
+            headers={"Content-Disposition":
+                     f"attachment;filename=taxi_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"})
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        return jsonify({"ok": False, "error": str(e)})
 
 # ==================== ADMIN HTML ====================
 ADMIN_HTML = r"""<!DOCTYPE html>
@@ -1678,6 +1838,10 @@ select.form-control option{background:var(--bg2)}
 .notif.removing{animation:slideOut .3s ease forwards}
 .empty{text-align:center;padding:40px 20px;color:var(--muted2)}
 .empty-icon{font-size:36px;margin-bottom:10px}
+.online-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.online-dot.free{background:var(--green)}
+.online-dot.busy{background:var(--red)}
+.online-dot.offline{background:var(--muted)}
 @media(max-width:768px){
   .topbar{padding:0 12px}.page{padding:12px}
   .form-row{flex-direction:column}
@@ -2158,8 +2322,13 @@ setInterval(()=>{
 async function loadDash(){
   try{
     const [sRes,dRes,oRes]=await Promise.all([
-      fetch('/api/stats'),fetch('/api/drivers/online'),fetch('/api/orders?status=pending')]);
-    const [sData,dData,oData]=await Promise.all([sRes.json(),dRes.json(),oRes.json()]);
+      fetch('/api/stats'),
+      fetch('/api/drivers/online'),
+      fetch('/api/orders?status=pending')
+    ]);
+    const [sData,dData,oData]=await Promise.all([
+      sRes.json(),dRes.json(),oRes.json()
+    ]);
     if(sData.ok){
       const s=sData.stats;
       document.getElementById('s-online').textContent=s.online;
@@ -2193,7 +2362,7 @@ async function loadDash(){
             <button class="btn btn-ghost" onclick="openChat('${d.car_number}','${d.name||d.car_number}')">💬</button>
           </div></td>
         </tr>`).join('');
-    } else {
+    }else{
       dt.innerHTML='<tr><td colspan="7"><div class="empty"><div class="empty-icon">🚗</div>Нет водителей онлайн</div></td></tr>';
     }
     const ot=document.getElementById('tbody-dash-orders');
@@ -2212,7 +2381,7 @@ async function loadDash(){
             <button class="btn btn-danger" onclick="cancelOrder(${o.id})">❌</button>
           </div></td>
         </tr>`).join('');
-    } else {
+    }else{
       ot.innerHTML='<tr><td colspan="8"><div class="empty"><div class="empty-icon">📦</div>Нет активных заказов</div></td></tr>';
     }
     document.getElementById('last-upd').textContent='Обновлено: '+fmtTime(Date.now()/1000);
@@ -2234,7 +2403,9 @@ async function loadDriversSelect(){
       const sel=document.getElementById(id);
       if(!sel) return;
       const cur=sel.value;
-      const fixed=Array.from(sel.options).filter(o=>o.value===''||o.value==='ALL').map(o=>o.outerHTML).join('');
+      const fixed=Array.from(sel.options)
+        .filter(o=>o.value===''||o.value==='ALL')
+        .map(o=>o.outerHTML).join('');
       sel.innerHTML=fixed;
       if(data.ok) data.drivers.forEach(d=>{
         const opt=document.createElement('option');
@@ -2253,21 +2424,26 @@ async function createOrder(){
   const to=document.getElementById('o-to').value.trim();
   const price=document.getElementById('o-price').value;
   const client=document.getElementById('o-client').value.trim();
-  if(!car||!from||!to||!price){showToast('o-toast','❌ Заполните все поля','err');return;}
+  if(!car||!from||!to||!price){
+    showToast('o-toast','❌ Заполните все поля','err');return;
+  }
   const btn=document.getElementById('btn-order');
   btn.disabled=true;btn.textContent='⏳...';
   try{
-    const res=await fetch('/api/orders/create',{method:'POST',
+    const res=await fetch('/api/orders/create',{
+      method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({car_number:car,from_address:from,to_address:to,
-        price:parseInt(price),client:client||'Диспетчер'})});
+      body:JSON.stringify({car_number:car,from_address:from,
+        to_address:to,price:parseInt(price),client:client||'Диспетчер'})
+    });
     const data=await res.json();
     if(data.ok){
       showToast('o-toast',`✅ Заказ создан! ${data.message||'#'+data.order_id}`,'ok');
       showNotif(`📦 Заказ отправлен → <b>${car}</b>`,'success');
-      ['o-from','o-to','o-price','o-client'].forEach(id=>document.getElementById(id).value='');
+      ['o-from','o-to','o-price','o-client'].forEach(id=>
+        document.getElementById(id).value='');
       loadOrders();
-    } else showToast('o-toast','❌ '+data.error,'err');
+    }else showToast('o-toast','❌ '+data.error,'err');
   }catch(e){showToast('o-toast','❌ Ошибка сервера','err');}
   finally{btn.disabled=false;btn.textContent='🚀 Отправить';}
 }
@@ -2295,7 +2471,7 @@ async function loadOrders(){
             <button class="btn btn-ghost" onclick='showOrderModal(${o.id},${JSON.stringify(o)})'>👁</button>
           </div></td>
         </tr>`).join('');
-    } else {
+    }else{
       tbody.innerHTML='<tr><td colspan="8"><div class="empty"><div class="empty-icon">📋</div>Нет заказов</div></td></tr>';
     }
   }catch(e){}
@@ -2314,9 +2490,11 @@ async function completeOrder(id){
 async function cancelOrder(id){
   if(!confirm(`Отменить заказ #${id}?`)) return;
   try{
-    const res=await fetch(`/api/orders/cancel/${id}`,{method:'POST',
+    const res=await fetch(`/api/orders/cancel/${id}`,{
+      method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({reason:'Отменён диспетчером'})});
+      body:JSON.stringify({reason:'Отменён диспетчером'})
+    });
     const data=await res.json();
     if(data.ok){showNotif('❌ Заказ отменён','warning');loadDash();loadOrders();}
     else showNotif('❌ '+data.message,'error');
@@ -2345,12 +2523,14 @@ async function loadPins(){
           <td><span class="pin-code">${p.pin}</span></td>
           <td>${badgeStatus(p.status)}</td>
           <td>${fmtDate(p.created_at)}</td>
-          <td>${p.status==='pending'?`<div style="display:flex;gap:4px">
-            <button class="btn btn-success" onclick="approvePin('${p.id}')">✅ Одобрить</button>
-            <button class="btn btn-danger" onclick="rejectPin('${p.id}')">❌ Отказать</button>
-          </div>`:'—'}</td>
+          <td>${p.status==='pending'?`
+            <div style="display:flex;gap:4px">
+              <button class="btn btn-success" onclick="approvePin('${p.id}')">✅ Одобрить</button>
+              <button class="btn btn-danger" onclick="rejectPin('${p.id}')">❌ Отказать</button>
+            </div>`:'—'}
+          </td>
         </tr>`).join('');
-    } else {
+    }else{
       tbody.innerHTML='<tr><td colspan="7"><div class="empty"><div class="empty-icon">🔑</div>Нет заявок</div></td></tr>';
     }
   }catch(e){}
@@ -2386,12 +2566,14 @@ async function loadBalanceReqs(){
           <td>${fmtMoney(r.amount)}</td>
           <td>${badgeStatus(r.status)}</td>
           <td>${fmtDate(r.created_at)}</td>
-          <td>${r.status==='pending'?`<div style="display:flex;gap:4px">
-            <button class="btn btn-success" onclick="approveBalance(${r.id})">✅</button>
-            <button class="btn btn-danger" onclick="rejectBalance(${r.id})">❌</button>
-          </div>`:'—'}</td>
+          <td>${r.status==='pending'?`
+            <div style="display:flex;gap:4px">
+              <button class="btn btn-success" onclick="approveBalance(${r.id})">✅</button>
+              <button class="btn btn-danger" onclick="rejectBalance(${r.id})">❌</button>
+            </div>`:'—'}
+          </td>
         </tr>`).join('');
-    } else {
+    }else{
       tbody.innerHTML='<tr><td colspan="5"><div class="empty"><div class="empty-icon">💳</div>Нет заявок</div></td></tr>';
     }
   }catch(e){}
@@ -2434,7 +2616,7 @@ async function loadAllDrivers(){
             <button class="btn btn-ghost" onclick="openChat('${d.car_number}','${d.name||d.car_number}')">💬</button>
           </div></td>
         </tr>`).join('');
-    } else {
+    }else{
       tbody.innerHTML='<tr><td colspan="8"><div class="empty"><div class="empty-icon">👥</div>Нет водителей</div></td></tr>';
     }
   }catch(e){}
@@ -2444,11 +2626,16 @@ async function startShift(){
   const car=document.getElementById('shift-car').value;
   if(!car){showToast('shift-toast','❌ Выберите водителя','err');return;}
   try{
-    const res=await fetch('/api/shift/start',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({car_number:car})});
+    const res=await fetch('/api/shift/start',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({car_number:car})
+    });
     const data=await res.json();
-    if(data.ok){showToast('shift-toast','✅ '+data.message,'ok');showNotif(`🟢 Смена начата: <b>${car}</b>`,'success');loadShifts();}
-    else showToast('shift-toast','❌ '+data.message,'err');
+    if(data.ok){
+      showToast('shift-toast','✅ '+data.message,'ok');
+      showNotif(`🟢 Смена начата: <b>${car}</b>`,'success');
+      loadShifts();
+    }else showToast('shift-toast','❌ '+data.message,'err');
   }catch(e){}
 }
 
@@ -2457,19 +2644,26 @@ async function endShift(){
   if(!car){showToast('shift-toast','❌ Выберите водителя','err');return;}
   if(!confirm(`Завершить смену ${car}?`)) return;
   try{
-    const res=await fetch('/api/shift/end',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({car_number:car})});
+    const res=await fetch('/api/shift/end',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({car_number:car})
+    });
     const data=await res.json();
-    if(data.ok){showToast('shift-toast','✅ '+data.message,'ok');showNotif(`🔴 Смена завершена: <b>${car}</b>`,'warning');loadShifts();}
-    else showToast('shift-toast','❌ '+data.message,'err');
+    if(data.ok){
+      showToast('shift-toast','✅ '+data.message,'ok');
+      showNotif(`🔴 Смена завершена: <b>${car}</b>`,'warning');
+      loadShifts();
+    }else showToast('shift-toast','❌ '+data.message,'err');
   }catch(e){}
 }
 
 async function endShiftDirect(car){
   if(!confirm(`Завершить смену ${car}?`)) return;
   try{
-    const res=await fetch('/api/shift/end',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({car_number:car})});
+    const res=await fetch('/api/shift/end',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({car_number:car})
+    });
     const data=await res.json();
     if(data.ok){showNotif(`🔴 Смена завершена: <b>${car}</b>`,'warning');loadShifts();}
   }catch(e){}
@@ -2494,7 +2688,7 @@ async function loadShifts(){
           <td>${s.orders_count}</td>
           <td><button class="btn btn-danger" onclick="endShiftDirect('${s.car_number}')">🔴 Завершить</button></td>
         </tr>`).join('');
-    } else {
+    }else{
       at.innerHTML='<tr><td colspan="7"><div class="empty"><div class="empty-icon">⏱</div>Нет активных смен</div></td></tr>';
     }
     const ht=document.getElementById('tbody-shifts-history');
@@ -2508,7 +2702,7 @@ async function loadShifts(){
           <td>${fmtMoney(s.revenue)}</td>
           <td>${s.orders_count}</td>
         </tr>`).join('');
-    } else {
+    }else{
       ht.innerHTML='<tr><td colspan="6"><div class="empty"><div class="empty-icon">📋</div>Нет истории</div></td></tr>';
     }
   }catch(e){}
@@ -2533,7 +2727,7 @@ async function loadRating(){
             <div class="rating-bar"><div class="rating-fill" style="width:${r.avg/5*100}%"></div></div>
           </div>
         </div>`).join('');
-    } else {
+    }else{
       list.innerHTML='<div class="empty"><div class="empty-icon">🏆</div>Нет данных</div>';
     }
   }catch(e){}
@@ -2544,9 +2738,10 @@ async function addRating(){
   const stars=document.getElementById('r-stars').value;
   if(!car){showNotif('❌ Выберите водителя','error');return;}
   try{
-    const res=await fetch('/api/rating/add',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({car_number:car,stars:parseInt(stars)})});
+    const res=await fetch('/api/rating/add',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({car_number:car,stars:parseInt(stars)})
+    });
     const data=await res.json();
     if(data.ok){showNotif(`⭐ Оценка ${stars} → <b>${car}</b>`,'success');loadRating();}
     else showNotif('❌ '+data.error,'error');
@@ -2564,9 +2759,9 @@ async function loadChatDrivers(){
         <div class="chat-driver-item ${currentChatCar===d.car_number?'active':''}"
              onclick="openChat('${d.car_number}','${d.name||d.car_number}')">
           <div class="chat-driver-name">${d.name||d.car_number}</div>
-          <div class="chat-driver-car">${d.car_number}</div>
+          <div class="chat-driver-car">${d.car_number} • ${d.status==='free'?'🟢':'🔴'}</div>
         </div>`).join('');
-    } else {
+    }else{
       list.innerHTML=hdr+'<div class="empty" style="padding:20px"><div class="empty-icon">🚗</div>Нет водителей</div>';
     }
   }catch(e){}
@@ -2592,7 +2787,7 @@ async function loadChatMessages(car){
           <div class="msg-time">${fmtTime(m.created_at)}</div>
         </div>`).join('');
       box.scrollTop=box.scrollHeight;
-    } else {
+    }else{
       box.innerHTML='<div class="empty"><div class="empty-icon">💬</div>Нет сообщений</div>';
     }
   }catch(e){}
@@ -2609,9 +2804,10 @@ async function sendMsg(){
   const text=input.value.trim();
   if(!text) return;
   try{
-    const res=await fetch('/api/chat/send',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({car_number:currentChatCar,text,sender:'admin'})});
+    const res=await fetch('/api/chat/send',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({car_number:currentChatCar,text,sender:'admin'})
+    });
     const data=await res.json();
     if(data.ok){input.value='';loadChatMessages(currentChatCar);}
   }catch(e){}
@@ -2635,11 +2831,13 @@ async function loadFinance(){
             <span class="car-num">${d.car_number}</span><br>
             <span style="color:var(--muted);font-size:11px">${d.name||'—'}</span>
           </div>
-          <div class="rev-bar-bg"><div class="rev-bar-fill" style="width:${Math.round(d.revenue/maxRev*100)}%"></div></div>
+          <div class="rev-bar-bg">
+            <div class="rev-bar-fill" style="width:${Math.round(d.revenue/maxRev*100)}%"></div>
+          </div>
           <div style="min-width:120px;text-align:right;font-weight:700;color:var(--gold)">${fmtMoney(d.revenue)}</div>
           <div style="min-width:50px;text-align:right;color:var(--muted);font-size:12px">${d.orders} зак.</div>
         </div>`).join('');
-    } else {
+    }else{
       list.innerHTML='<div class="empty"><div class="empty-icon">💰</div>Нет данных</div>';
     }
     const tbody=document.getElementById('tbody-transactions');
@@ -2649,10 +2847,11 @@ async function loadFinance(){
           <td><span class="car-num">${t.car_number}</span></td>
           <td style="color:${t.amount>0?'var(--green)':'var(--red)'}">
             ${t.amount>0?'+':''}${fmtMoney(t.amount)}</td>
-          <td>${t.type}</td><td>${t.comment||'—'}</td>
+          <td>${t.type}</td>
+          <td>${t.comment||'—'}</td>
           <td>${fmtDate(t.created_at)}</td>
         </tr>`).join('');
-    } else {
+    }else{
       tbody.innerHTML='<tr><td colspan="5"><div class="empty"><div class="empty-icon">📊</div>Нет транзакций</div></td></tr>';
     }
   }catch(e){}
@@ -2684,14 +2883,20 @@ async function saveTariffs(){
     const b=document.getElementById(`t-${zone}-base`);
     const k=document.getElementById(`t-${zone}-km`);
     const w=document.getElementById(`t-${zone}-wait`);
-    if(b&&k&&w) tariffs[zone]={base_fare:+b.value,rate_per_km:+k.value,wait_rate:+w.value};
+    if(b&&k&&w) tariffs[zone]={
+      base_fare:+b.value,rate_per_km:+k.value,wait_rate:+w.value
+    };
   });
   try{
-    const res=await fetch('/api/tariffs/update',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(tariffs)});
+    const res=await fetch('/api/tariffs/update',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(tariffs)
+    });
     const data=await res.json();
-    if(data.ok){showToast('tariff-toast','✅ Тарифы сохранены!','ok');showNotif('💰 Тарифы обновлены','success');}
-    else showToast('tariff-toast','❌ '+data.error,'err');
+    if(data.ok){
+      showToast('tariff-toast','✅ Тарифы сохранены!','ok');
+      showNotif('💰 Тарифы обновлены','success');
+    }else showToast('tariff-toast','❌ '+data.error,'err');
   }catch(e){}
 }
 
@@ -2708,7 +2913,7 @@ async function loadLogs(){
           <td><span class="car-num">${l.car_number||'—'}</span></td>
           <td style="color:var(--muted);font-size:12px">${l.details||'—'}</td>
         </tr>`).join('');
-    } else {
+    }else{
       tbody.innerHTML='<tr><td colspan="4"><div class="empty"><div class="empty-icon">📝</div>Нет логов</div></td></tr>';
     }
   }catch(e){}
@@ -2762,16 +2967,22 @@ function showOrderModal(id,o){
 
 async function startShiftFor(car){
   try{
-    const res=await fetch('/api/shift/start',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({car_number:car})});
+    const res=await fetch('/api/shift/start',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({car_number:car})
+    });
     const data=await res.json();
-    showNotif(data.ok?`🟢 Смена начата: ${car}`:'❌ '+data.message,data.ok?'success':'error');
-    closeModal('modal-driver');loadShifts();
+    showNotif(data.ok?`🟢 Смена начата: ${car}`:'❌ '+data.message,
+              data.ok?'success':'error');
+    closeModal('modal-driver');
+    loadShifts();
   }catch(e){}
 }
 
 document.querySelectorAll('.modal-bg').forEach(bg=>{
-  bg.addEventListener('click',function(e){if(e.target===this)this.classList.remove('open');});
+  bg.addEventListener('click',function(e){
+    if(e.target===this) this.classList.remove('open');
+  });
 });
 
 setInterval(()=>{
@@ -2791,7 +3002,7 @@ loadDriversSelect();
 def index():
     return render_template_string(ADMIN_HTML)
 
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚕 TAXI 3042 запущен на порту {port}")
-    app.run(host="0.0.0.0",port=port,debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)
