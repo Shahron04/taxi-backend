@@ -1,6 +1,11 @@
 services:
   - type: web
-    name: taxi-bot
-    env: python
+    name: taxi-server
+    runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: ADMIN_LOGIN
+        value: admin
+      - key: ADMIN_PASSWORD
+        value: taxi3042
