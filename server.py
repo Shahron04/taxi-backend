@@ -826,36 +826,50 @@ async function deleteDriver(car) {
 
 // ========== ЗАЯВКИ ==========
 async function loadPins() {
-  let r = await fetch("/api/admin/drivers");
-  let d = await r.json();
-  if (!d.success) return;
-  document.getElementById("page-pins").innerHTML = `
-    <div class="section"><div class="section-title">🔑 Заявки на регистрацию</div>
-    ${d.pending.length ? d.pending.map(p => `
-      <div class="pin-card">
-        <div><b>${p.name}</b><br><span style="color:#888">${p.car_number} | ${p.phone}</span><br>${formatTime(p.created_at)}</div>
-        <div class="pin-code">${p.pin}</div>
-        <div><button class="btn btn-success" onclick="approvePin('${p.id}')">✅ Одобрить</button>
-        <button class="btn btn-danger" onclick="rejectPin('${p.id}')">❌ Отклонить</button></div>
-      </div>
-    `).join("") : "<div class='no-data'>Нет новых заявок</div>"}
-  `;
+  const container = document.getElementById("page-pins");
+  if (!container) return;
+  // Показываем индикатор загрузки
+  container.innerHTML = '<div class="section"><div class="section-title">🔑 Заявки на регистрацию <button class="btn btn-secondary btn-sm" onclick="loadPins()">🔄 Обновить</button></div><div class="no-data">Загрузка...</div></div>';
+  try {
+    let r = await fetch("/api/admin/drivers");
+    let d = await r.json();
+    if (!d.success) throw new Error("Ошибка API");
+    const pending = d.pending || [];
+    if (pending.length === 0) {
+      container.innerHTML = `
+        <div class="section">
+          <div class="section-title">🔑 Заявки на регистрацию <button class="btn btn-secondary btn-sm" onclick="loadPins()">🔄 Обновить</button></div>
+          <div class="no-data">Нет новых заявок</div>
+        </div>`;
+    } else {
+      container.innerHTML = `
+        <div class="section">
+          <div class="section-title">🔑 Заявки на регистрацию <button class="btn btn-secondary btn-sm" onclick="loadPins()">🔄 Обновить</button></div>
+          ${pending.map(p => `
+            <div class="pin-card">
+              <div><b>${escapeHtml(p.name)}</b><br><span style="color:#888">${escapeHtml(p.car_number)} | ${escapeHtml(p.phone)}</span><br>${formatTime(p.created_at)}</div>
+              <div class="pin-code">${p.pin}</div>
+              <div><button class="btn btn-success" onclick="approvePin('${p.id}')">✅ Одобрить</button>
+              <button class="btn btn-danger" onclick="rejectPin('${p.id}')">❌ Отклонить</button></div>
+            </div>
+          `).join("")}
+        </div>`;
+    }
+  } catch(e) {
+    console.error("loadPins error:", e);
+    container.innerHTML = `<div class="section"><div class="section-title">🔑 Заявки на регистрацию <button class="btn btn-secondary btn-sm" onclick="loadPins()">🔄 Обновить</button></div><div class="no-data">Ошибка загрузки. Нажмите Обновить.</div></div>`;
+  }
 }
 
-async function approvePin(id) {
-  if (!confirm("Одобрить водителя?")) return;
-  let r = await fetch("/api/admin/approve/"+id, {method:"POST"});
-  let d = await r.json();
-  if (d.success) {
-    alert(`✅ Водитель одобрен! ПИН: ${d.pin}\nСообщите водителю этот ПИН.`);
-    loadPins(); loadDashboard();
-  } else alert("Ошибка");
-}
-
-async function rejectPin(id) {
-  if (!confirm("Отклонить?")) return;
-  await fetch("/api/admin/reject/"+id, {method:"POST"});
-  loadPins();
+// Добавьте вспомогательную функцию для безопасности (чтобы XSS не было)
+function escapeHtml(str) {
+  if (!str) return "";
+  return str.replace(/[&<>]/g, function(m) {
+    if (m === '&') return '&amp;';
+    if (m === '<') return '&lt;';
+    if (m === '>') return '&gt;';
+    return m;
+  });
 }
 
 // ========== СМЕНЫ ==========
