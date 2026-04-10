@@ -685,6 +685,7 @@ function fmtMoney(n) { if (!n) return "0 сум"; return n.toLocaleString("ru") 
 function formatTime(ts) { if (!ts) return "—"; let d=new Date(ts*1000); return d.toLocaleString(); }
 function statusLabel(s) { return {free:"Свободен", busy:"На заказе", offline:"Офлайн"}[s]||s; }
 function orderStatus(s) { return {pending:"Ожидает", accepted:"Принят", completed:"Завершён", cancelled:"Отменён"}[s]||s; }
+function escapeHtml(str) { if (!str) return ""; return str.replace(/[&<>]/g, function(m) { if (m === '&') return '&amp;'; if (m === '<') return '&lt;'; if (m === '>') return '&gt;'; return m; }); }
 
 // Навигация
 function showPage(page) {
@@ -742,18 +743,18 @@ async function loadDashboard() {
       <div class="section"><div class="section-title">🚗 Водители онлайн</div>
         <div class="table-wrap"><table><thead><tr><th>Авто</th><th>Имя</th><th>Статус</th><th>Баланс</th><th>Рейтинг</th><th>Заказов</th><th>Действия</th></tr></thead>
         <tbody>${d.online_drivers.map(dr => `<tr>
-          <td><b>${dr.car_number}</b></td><td>${dr.name}</td>
+          <td><b>${escapeHtml(dr.car_number)}</b></td><td>${escapeHtml(dr.name)}</td>
           <td><span class="badge badge-${dr.status}">${statusLabel(dr.status)}</span></td>
           <td>${fmtMoney(dr.balance)}</td><td>⭐ ${dr.rating}</td><td>${dr.orders_count}</td>
-          <td><button class="btn btn-primary btn-sm" onclick="quickOrder('${dr.car_number}')">📋 Заказ</button>
-          <button class="btn btn-secondary btn-sm" onclick="openChat('${dr.car_number}')">💬</button></td>
+          <td><button class="btn btn-primary btn-sm" onclick="quickOrder('${escapeHtml(dr.car_number)}')">📋 Заказ</button>
+          <button class="btn btn-secondary btn-sm" onclick="openChat('${escapeHtml(dr.car_number)}')">💬</button></td>
         </tr>`).join("")}</tbody></table></div>
       </div>
       <div class="section"><div class="section-title">📋 Активные заказы</div>
-        <div class="table-wrap"><table><thead><tr><th>#</th><th>Водитель</th><th>Откуда</th><th>Куда</th><th>Цена</th><th>Клиент</th><th>Время</th></tr></thead>
+        <div class="table-wrap"><tr><thead><tr><th>#</th><th>Водитель</th><th>Откуда</th><th>Куда</th><th>Цена</th><th>Клиент</th><th>Время</th></tr></thead>
         <tbody>${d.active_orders.map(o => `<tr>
-          <td>${o.id}</td><td>${o.car_number}</td><td>${o.from_address}</td><td>${o.to_address}</td>
-          <td>${fmtMoney(o.price)}</td><td>${o.client}</td><td>${formatTime(o.created_at)}</td>
+          <td>${o.id}</td><td>${escapeHtml(o.car_number)}</td><td>${escapeHtml(o.from_address)}</td><td>${escapeHtml(o.to_address)}</td>
+          <td>${fmtMoney(o.price)}</td><td>${escapeHtml(o.client)}</td><td>${formatTime(o.created_at)}</td>
         </tr>`).join("")}</tbody></table></div>
       </div>
     `;
@@ -789,10 +790,10 @@ async function loadOrders() {
   if (!d.success) return;
   document.getElementById("page-orders").innerHTML = `
     <div class="section"><div class="section-title">📋 Все заказы <button class="btn btn-primary btn-sm" onclick="openModal('modal-order')">+ Новый</button></div>
-    <div class="table-wrap"><table><thead><tr><th>#</th><th>Авто</th><th>Откуда</th><th>Куда</th><th>Расст.</th><th>Цена</th><th>Клиент</th><th>Статус</th><th>Время</th></tr></thead>
+    <div class="table-wrap"></table><thead><tr><th>#</th><th>Авто</th><th>Откуда</th><th>Куда</th><th>Расст.</th><th>Цена</th><th>Клиент</th><th>Статус</th><th>Время</th></tr></thead>
     <tbody>${d.orders.map(o => `<tr>
-      <td>${o.id}</td><td>${o.car_number}</td><td>${o.from_address}</td><td>${o.to_address}</td>
-      <td>${o.distance}</td><td>${fmtMoney(o.price)}</td><td>${o.client}</td>
+      <td>${o.id}</td><td>${escapeHtml(o.car_number)}</td><td>${escapeHtml(o.from_address)}</td><td>${escapeHtml(o.to_address)}</td>
+      <td>${o.distance}</td><td>${fmtMoney(o.price)}</td><td>${escapeHtml(o.client)}</td>
       <td><span class="badge badge-${o.status}">${orderStatus(o.status)}</span></td><td>${formatTime(o.created_at)}</td>
     </tr>`).join("")}</tbody></table></div></div>
   `;
@@ -807,12 +808,12 @@ async function loadDrivers() {
     <div class="section"><div class="section-title">🚗 Все водители</div>
     <div class="table-wrap"><table><thead><tr><th>Авто</th><th>Имя</th><th>Телефон</th><th>Статус</th><th>Баланс</th><th>ПИН</th><th>Рейтинг</th><th>Заказов</th><th>Регистрация</th><th>Действия</th></tr></thead>
     <tbody>${d.drivers.map(dr => `<tr>
-      <td><b>${dr.car_number}</b></td><td>${dr.name}</td><td>${dr.phone}</td>
+      <td><b>${escapeHtml(dr.car_number)}</b></td><td>${escapeHtml(dr.name)}</td><td>${escapeHtml(dr.phone)}</td>
       <td><span class="badge badge-${dr.status}">${statusLabel(dr.status)}</span></td>
       <td>${fmtMoney(dr.balance)}</td><td><code style="background:#f5c51820;padding:2px 8px;border-radius:6px">${dr.pin}</code></td>
       <td>⭐ ${dr.rating}</td><td>${dr.orders_count}</td><td>${formatTime(dr.created_at)}</td>
-      <td><button class="btn btn-secondary btn-sm" onclick="openChat('${dr.car_number}')">💬</button>
-      <button class="btn btn-danger btn-sm" onclick="deleteDriver('${dr.car_number}')">🗑</button></td>
+      <td><button class="btn btn-secondary btn-sm" onclick="openChat('${escapeHtml(dr.car_number)}')">💬</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteDriver('${escapeHtml(dr.car_number)}')">🗑</button></td>
     </tr>`).join("")}</tbody></table></div></div>
   `;
 }
@@ -828,7 +829,6 @@ async function deleteDriver(car) {
 async function loadPins() {
   const container = document.getElementById("page-pins");
   if (!container) return;
-  // Показываем индикатор загрузки
   container.innerHTML = '<div class="section"><div class="section-title">🔑 Заявки на регистрацию <button class="btn btn-secondary btn-sm" onclick="loadPins()">🔄 Обновить</button></div><div class="no-data">Загрузка...</div></div>';
   try {
     let r = await fetch("/api/admin/drivers");
@@ -861,15 +861,37 @@ async function loadPins() {
   }
 }
 
-// Добавьте вспомогательную функцию для безопасности (чтобы XSS не было)
-function escapeHtml(str) {
-  if (!str) return "";
-  return str.replace(/[&<>]/g, function(m) {
-    if (m === '&') return '&amp;';
-    if (m === '<') return '&lt;';
-    if (m === '>') return '&gt;';
-    return m;
-  });
+async function approvePin(id) {
+  if (!confirm("Одобрить водителя?")) return;
+  try {
+    let r = await fetch("/api/admin/approve/"+id, {method:"POST"});
+    let d = await r.json();
+    if (d.success) {
+      alert(`✅ Водитель одобрен! ПИН: ${d.pin}\nСообщите водителю этот ПИН.`);
+      await loadPins();
+      await loadDashboard();
+    } else {
+      alert("Ошибка при одобрении");
+    }
+  } catch(e) {
+    alert("Ошибка сети");
+  }
+}
+
+async function rejectPin(id) {
+  if (!confirm("Отклонить заявку?")) return;
+  try {
+    let r = await fetch("/api/admin/reject/"+id, {method:"POST"});
+    let d = await r.json();
+    if (d.success) {
+      alert("Заявка отклонена");
+      await loadPins();
+    } else {
+      alert("Ошибка");
+    }
+  } catch(e) {
+    alert("Ошибка сети");
+  }
 }
 
 // ========== СМЕНЫ ==========
@@ -879,8 +901,8 @@ async function loadShifts() {
   document.getElementById("page-shifts").innerHTML = `
     <div class="section"><div class="section-title">⏱ Смены водителей</div>
     <div class="table-wrap"><table><thead><tr><th>Авто</th><th>Водитель</th><th>Начало</th><th>Конец</th><th>Выручка</th><th>Заказов</th></tr></thead>
-    <tbody>${d.shifts.map(s => `<tr>
-      <td>${s.car_number}</td><td>${s.name||"—"}</td><td>${formatTime(s.start_time)}</td>
+    <tbody>${d.shifts.map(s => `<td>
+      <td>${escapeHtml(s.car_number)}</td><td>${escapeHtml(s.name)||"—"}</td><td>${formatTime(s.start_time)}</td>
       <td>${formatTime(s.end_time)}</td><td>${fmtMoney(s.revenue)}</td><td>${s.orders_count}</td>
     </tr>`).join("")}</tbody></table></div></div>
   `;
@@ -893,8 +915,9 @@ async function loadRatings() {
   document.getElementById("page-ratings").innerHTML = `
     <div class="section"><div class="section-title">⭐ Рейтинг водителей</div>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Авто</th><th>Водитель</th><th>Рейтинг</th><th>Оценок</th></tr></thead>
-    <tbody>${d.ratings.map((r,i) => `<tr>
-      <td>${i+1}</td><td>${r.car_number}</td><td>${r.name}</td><td>${'⭐'.repeat(Math.round(r.avg_rating))} ${r.avg_rating}</td><td>${r.count}</td>
+    <tbody>${d.ratings.map((r,i) => `<td>
+      <td>${i+1}</td><td>${escapeHtml(r.car_number)}</td><td>${escapeHtml(r.name)}</td>
+      <td>${'⭐'.repeat(Math.round(r.avg_rating))} ${r.avg_rating}</td><td>${r.count}</td>
     </tr>`).join("")}</tbody></table></div></div>
   `;
 }
@@ -904,8 +927,8 @@ async function loadChatList() {
   let r = await fetch("/api/admin/drivers");
   let d = await r.json();
   let html = `<div class="chat-list">${d.drivers.map(dr => `
-    <div class="chat-item" onclick="openChat('${dr.car_number}')">
-      <span>${dr.car_number} — ${dr.name}</span> <span class="badge badge-${dr.status}">${statusLabel(dr.status)}</span>
+    <div class="chat-item" onclick="openChat('${escapeHtml(dr.car_number)}')">
+      <span>${escapeHtml(dr.car_number)} — ${escapeHtml(dr.name)}</span> <span class="badge badge-${dr.status}">${statusLabel(dr.status)}</span>
     </div>`).join("")}</div><div id="chat-area" style="margin-top:16px"><div class="no-data">Выберите водителя</div></div>`;
   document.getElementById("page-chat").innerHTML = html;
 }
@@ -914,11 +937,11 @@ async function openChat(car) {
   currentChatCar = car;
   let r = await fetch("/api/admin/chat/"+car);
   let d = await r.json();
-  let msgs = d.messages.map(m => `<div class="msg msg-${m.sender}"><b>${m.sender==="admin"?"Диспетчер":"Водитель"}:</b> ${m.text}<div style="font-size:10px;color:#666">${m.created_at}</div></div>`).join("");
+  let msgs = d.messages.map(m => `<div class="msg msg-${m.sender}"><b>${m.sender==="admin"?"Диспетчер":"Водитель"}:</b> ${escapeHtml(m.text)}<div style="font-size:10px;color:#666">${m.created_at}</div></div>`).join("");
   document.getElementById("page-chat").innerHTML = `
     <div class="chat-list">${document.querySelector(".chat-list")?.innerHTML || ""}</div>
     <div style="margin-top:16px">
-      <div class="section-title">💬 Чат с ${car}</div>
+      <div class="section-title">💬 Чат с ${escapeHtml(car)}</div>
       <div class="chat-messages" id="chat-messages">${msgs || "<div class='no-data'>Нет сообщений</div>"}</div>
       <div class="chat-input-row"><input class="chat-input" id="chat-input" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendChatMsg()">
       <button class="btn btn-primary" onclick="sendChatMsg()">Отправить</button></div>
@@ -942,16 +965,16 @@ async function loadFinances() {
   let d = await r.json();
   document.getElementById("page-finances").innerHTML = `
     <div class="section"><div class="section-title">💳 Заявки на пополнение</div>
-    <div class="table-wrap"><table><thead><tr><th>Авто</th><th>Сумма</th><th>Время</th><th>Действия</th></tr></thead>
+    <div class="table-wrap"><tr><thead><tr><th>Авто</th><th>Сумма</th><th>Время</th><th>Действия</th></tr></thead>
     <tbody>${d.balance_requests.map(req => `<tr>
-      <td>${req.car_number}</td><td>${fmtMoney(req.amount)}</td><td>${formatTime(req.created_at)}</td>
+      <td>${escapeHtml(req.car_number)}</td><td>${fmtMoney(req.amount)}</td><td>${formatTime(req.created_at)}</td>
       <td><button class="btn btn-success btn-sm" onclick="approveBalance(${req.id})">✅ Одобрить</button></td>
     </tr>`).join("")}</tbody></table></div></div>
     <div class="section"><div class="section-title">📊 Транзакции</div>
-    <div class="table-wrap"><table><thead><tr><th>Авто</th><th>Сумма</th><th>Тип</th><th>Комментарий</th><th>Время</th></tr></thead>
-    <tbody>${d.transactions.map(t => `<tr>
-      <td>${t.car_number}</td><td style="color:${t.type==='income'?'#4caf50':'#2196f3'}">${fmtMoney(t.amount)}</td>
-      <td>${t.type==='income'?'Доход':'Пополнение'}</td><td>${t.comment||"—"}</td><td>${formatTime(t.created_at)}</td>
+    <div class="table-wrap"></table><thead><tr><th>Авто</th><th>Сумма</th><th>Тип</th><th>Комментарий</th><th>Время</th></tr></thead>
+    <tbody>${d.transactions.map(t => `<td>
+      <td>${escapeHtml(t.car_number)}</td><td style="color:${t.type==='income'?'#4caf50':'#2196f3'}">${fmtMoney(t.amount)}</td>
+      <td>${t.type==='income'?'Доход':'Пополнение'}</td><td>${escapeHtml(t.comment)||"—"}</td><td>${formatTime(t.created_at)}</td>
     </tr>`).join("")}</tbody></table></div></div>
   `;
 }
@@ -972,7 +995,7 @@ async function loadSettings() {
     <div class="section"><div class="section-title">⚙️ Тарифы</div>
     ${tariffData.map(t => `
       <div style="background:#1a1a1a;border-radius:10px;padding:16px;margin-bottom:12px">
-        <div style="font-weight:700;margin-bottom:12px">${t.name}</div>
+        <div style="font-weight:700;margin-bottom:12px">${escapeHtml(t.name)}</div>
         <div class="form-row">
           <div class="form-group"><label>Посадка (сум)</label><input type="number" id="base_${t.id}" value="${t.base_fare}"></div>
           <div class="form-group"><label>За км (сум)</label><input type="number" id="km_${t.id}" value="${t.rate_per_km}"></div>
